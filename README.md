@@ -144,4 +144,3 @@ After `apply`, Terraform prints the public IP. First boot takes ~5–10 minutes 
 ## Contributing · Security
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
-# HackathonInfra
