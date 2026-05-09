@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+scrape_configs:
+  - job_name: youtube_clone_api
+    metrics_path: /api/metrics
+    static_configs:
+      - targets:
+          - nginx:80
+        labels:
+          environment: compose
+
+  - job_name: backend
+    metrics_path: /metrics
+    scrape_interval: 15s
+    static_configs:
+      - targets:
+          - backend:8000
+        labels:
+          environment: compose
+
+# Notes:
+# - `youtube_clone_api` scrapes via Nginx (nginx:80/api/metrics) — matches the `nginx` service name in docker-compose.yml.
+# - `backend` scrapes the FastAPI process directly (backend:8000/metrics), bypassing Nginx.
+#   Both jobs are valid on the shared Docker Compose network.
+# - On Docker Desktop host-based setups, replace service names with `host.docker.internal` and the mapped port.

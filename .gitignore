@@ -1,0 +1,60 @@
+# Databases
+*/*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.python-version
+.venv/
+venv/
+*/.venv/
+*/__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Frontend
+node_modules/
+*/node_modules/
+
+# Environment files
+.env
+
+# Terraform — state files contain plaintext secrets; NEVER commit them
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Terraform variable files with real values (examples are safe to commit)
+infra/terraform.tfvars
+infra/envs/aws.tfvars
+infra/envs/remote.tfvars
+
+# Build outputs
+build/
+dist/
+
+# Local runtime artifacts
+backend/uploads/
+frontend/package-lock.json
+frontend/tsconfig.tsbuildinfo
+
+.claude/
+CLAUDE.md
+.claudeignore
+.codexbackend/loadtests/results/
+observability/prometheus/prometheus.local.yml
+
+# SSH / key pair files
+*.ppk
+*.pem
+*.key
+*.pub
+
+# Terraform plan files
+tfplan
+**/tfplan

@@ -1,0 +1,123 @@
+# =============================================================================
+# AWS EC2 DEPLOYMENT — c5d.24xlarge (96 vCPU / 192 GB RAM / 4×900 GB NVMe)
+# =============================================================================
+# Copiar a infra/envs/aws.tfvars y completar con valores reales.
+# Secretos (passwords, JWT key) se pasan por la línea de comandos o mediante
+# TF_VAR_* env vars — NO los pongas aquí.
+#
+# NUNCA commitear infra/envs/aws.tfvars al control de versiones.
+# =============================================================================
+
+# =============================================================================
+# AWS TARGET
+# =============================================================================
+aws_region    = "us-east-2"
+project_name  = "youtube-clone"
+environment   = "prod"
+
+# c5d.24xlarge: 96 vCPU · 192 GB RAM · 4×900 GB NVMe SSD · 25 Gbps network
+# El script de arranque detecta automáticamente los NVMe y crea un RAID0.
+instance_type = "c5d.24xlarge"
+
+# Dejar vacío para usar la VPC/subnet default de la cuenta AWS.
+vpc_id    = ""
+subnet_id = ""
+
+# EBS root: 100 GB (los vídeos/uploads van al NVMe vía symlink).
+root_volume_size_gb = 100
+
+# Elastic IP: recomendado en producción para IP fija (evita cambio al reiniciar).
+create_eip = true
+
+# Par de claves SSH para acceso de administración.
+key_name         = ""
+ssh_cidr_blocks  = []   # Ejemplo: ["203.0.113.10/32"]
+http_cidr_blocks = ["0.0.0.0/0"]
+
+# =============================================================================
+# APPLICATION SOURCE
+# =============================================================================
+repo_url = "https://github.com/YOUR_ORG/YOUR_REPO.git"
+repo_ref = "main"
+
+# =============================================================================
+# APPLICATION RUNTIME
+# =============================================================================
+app_env     = "production"
+postgres_db = "youtube_clone"
+
+# Añadir la IP pública de la EC2 aquí una vez conocida (post-apply).
+cors_allow_origins = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost",
+  "http://127.0.0.1",
+]
+
+# =============================================================================
+# CONCURRENCIA
+# =============================================================================
+# UvicornWorker (async): recomendación = vCPU+1.
+# c5d.24xlarge: 96 vCPU → 97 workers.
+backend_web_concurrency = 97
+
+# Workers RQ: asignar los CPUs del contenedor worker (12 CPUs).
+worker_concurrency = 12
+
+# =============================================================================
+# SQLALCHEMY CONNECTION POOL
+# =============================================================================
+# Conexiones Postgres = backend_web_concurrency × (pool_size + max_overflow)
+#                     = 97 × (5 + 5) = 970
+# → postgres_max_connections debe ser > 970 (usamos 1000).
+db_pool_size    = 5
+db_max_overflow = 5
+
+# Redis: 50 conexiones por instancia de backend.
+redis_max_connections = 50
+
+# =============================================================================
+# POSTGRESQL TUNING (contenedor recibe 24 CPUs / 64 GB RAM)
+# =============================================================================
+postgres_max_connections      = 1000
+postgres_shared_buffers       = "16GB"   # 25% de 64 GB
+postgres_effective_cache_size = "48GB"   # 75% de 64 GB
+postgres_work_mem             = "16MB"   # por operación sort/hash, no por conexión
+postgres_maintenance_work_mem = "2GB"    # para VACUUM, CREATE INDEX
+postgres_shm_size             = "20g"    # debe ser ≥ shared_buffers (en formato Docker)
+
+# =============================================================================
+# REDIS TUNING (contenedor recibe 4 CPUs / 18 GB RAM)
+# =============================================================================
+redis_maxmemory = "16gb"   # allkeys-lru eviction activado en docker-compose
+
+# =============================================================================
+# RESOURCE LIMITS DE CONTENEDORES (total: 96 CPUs / 152 GB RAM)
+# =============================================================================
+# nginx:    4 CPU /  2 GB
+nginx_cpu_limit    = "4.00"
+nginx_memory_limit = "2G"
+
+# postgres: 24 CPU / 64 GB
+postgres_cpu_limit    = "24.00"
+postgres_memory_limit = "64G"
+
+# redis:    4 CPU / 18 GB
+redis_cpu_limit    = "4.00"
+redis_memory_limit = "18G"
+
+# backend:  48 CPU / 48 GB  (97 workers × ~400 MB ≈ 38 GB; 10 GB headroom)
+backend_cpu_limit    = "48.00"
+backend_memory_limit = "48G"
+
+# worker:   12 CPU / 16 GB  (12 procesos RQ)
+worker_cpu_limit    = "12.00"
+worker_memory_limit = "16G"
+
+# frontend:  4 CPU /  4 GB  (Vite dev server; sustituir por static build en producción real)
+frontend_cpu_limit    = "4.00"
+frontend_memory_limit = "4G"
+
+tags = {
+  Owner = "hackathon"
+}

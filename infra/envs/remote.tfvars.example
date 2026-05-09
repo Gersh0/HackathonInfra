@@ -1,0 +1,28 @@
+# =============================================================================
+# REMOTE LINUX SERVER DEPLOYMENT SETTINGS
+# =============================================================================
+# Copy this file to infra/envs/remote.tfvars and fill in your values.
+# Secrets are injected automatically from the root .env file.
+#
+# NEVER commit infra/envs/remote.tfvars to version control.
+# =============================================================================
+
+host                 = "your-server-ip-or-hostname"
+ssh_user             = "ubuntu"
+ssh_private_key_path = "/home/your-user/.ssh/id_rsa"
+ssh_port             = 22
+
+repo_url    = "https://github.com/YOUR_ORG/YOUR_REPO.git"
+repo_ref    = "main"
+app_env     = "production"
+postgres_db = "youtube_clone"
+
+backend_web_concurrency = 4
+worker_concurrency      = 2
+
+cors_allow_origins = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost",
+  "http://127.0.0.1",
+]

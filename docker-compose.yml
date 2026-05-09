@@ -1,0 +1,428 @@
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: youtube_clone_nginx
+    profiles: ["prod"]
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./backend/uploads:/var/www/uploads:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep nginx && nginx -t"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    deploy:
+      resources:
+        limits:
+          cpus: "${NGINX_CPU_LIMIT:-4.00}"
+          memory: ${NGINX_MEMORY_LIMIT:-2G}
+        reservations:
+          cpus: "${NGINX_CPU_RESERVATION:-1.00}"
+          memory: ${NGINX_MEMORY_RESERVATION:-512M}
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: youtube_clone_postgres
+    profiles: ["prod"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-youtube_clone}
+      POSTGRES_USER: ${POSTGRES_USER:-ci_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ci_password}
+    # Performance tuning via -c flags; values are interpolated from the .env file
+    # by Docker Compose before the container starts (not inside the container shell).
+    # Defaults are conservative enough for dev machines; production values are set
+    # via the Terraform-generated .env on the EC2 instance.
+    command: >-
+      postgres
+      -c max_connections=${POSTGRES_MAX_CONNECTIONS:-200}
+      -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-1GB}
+      -c effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-3GB}
+      -c work_mem=${POSTGRES_WORK_MEM:-16MB}
+      -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-256MB}
+      -c checkpoint_completion_target=0.9
+      -c random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}
+      -c effective_io_concurrency=${POSTGRES_EFFECTIVE_IO_CONCURRENCY:-300}
+      -c wal_buffers=64MB
+      -c max_wal_size=4GB
+      -c min_wal_size=1GB
+    # shared_buffers requires shared memory >= its value; default 2g covers 1GB shared_buffers.
+    shm_size: '${POSTGRES_SHM_SIZE:-2g}'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ci_user} -d ${POSTGRES_DB:-youtube_clone}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    deploy:
+      resources:
+        limits:
+          cpus: "${POSTGRES_CPU_LIMIT:-24.00}"
+          memory: ${POSTGRES_MEMORY_LIMIT:-64G}
+        reservations:
+          cpus: "${POSTGRES_CPU_RESERVATION:-4.00}"
+          memory: ${POSTGRES_MEMORY_RESERVATION:-2G}
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: youtube_clone_redis
+    profiles: ["prod"]
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_MAXMEMORY=${REDIS_MAXMEMORY:-1gb}
+    command:
+      - sh
+      - -c
+      - >-
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec redis-server
+            --requirepass "$$REDIS_PASSWORD"
+            --appendonly yes
+            --tcp-backlog 511
+            --maxmemory "$$REDIS_MAXMEMORY"
+            --maxmemory-policy allkeys-lru
+            --hz 25;
+        else
+          exec redis-server
+            --appendonly yes
+            --tcp-backlog 511
+            --maxmemory "$$REDIS_MAXMEMORY"
+            --maxmemory-policy allkeys-lru
+            --hz 25;
+        fi
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "if [ -n \"$${REDIS_PASSWORD}\" ]; then redis-cli -a \"$${REDIS_PASSWORD}\" ping; else redis-cli ping; fi",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "${REDIS_CPU_LIMIT:-4.00}"
+          memory: ${REDIS_MEMORY_LIMIT:-18G}
+        reservations:
+          cpus: "${REDIS_CPU_RESERVATION:-1.00}"
+          memory: ${REDIS_MEMORY_RESERVATION:-512M}
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    container_name: youtube_clone_backend
+    profiles: ["prod"]
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-ci_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ci_password}
+      - POSTGRES_DB=${POSTGRES_DB:-youtube_clone}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_URL=${REDIS_URL:-}
+      - APP_ENV=${APP_ENV:-production}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-ci_jwt_secret_key_placeholder_min_32_chars}
+      - AUTH_TOKEN_ISSUER_ENABLED=${AUTH_TOKEN_ISSUER_ENABLED:-false}
+      - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-["http://localhost:5173","http://127.0.0.1:5173","http://localhost","http://127.0.0.1"]}
+      # SQLAlchemy pool — total Postgres connections ≤ BACKEND_WEB_CONCURRENCY × (POOL_SIZE + MAX_OVERFLOW)
+      - DB_POOL_SIZE=${DB_POOL_SIZE:-5}
+      - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-5}
+      - DB_POOL_TIMEOUT=${DB_POOL_TIMEOUT:-30}
+      - DB_POOL_RECYCLE=${DB_POOL_RECYCLE:-1800}
+      - REDIS_MAX_CONNECTIONS=${REDIS_MAX_CONNECTIONS:-50}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ANYIO_MIN_THREADS=${ANYIO_MIN_THREADS:-0}
+      - VIDEO_DETAIL_CACHE_TTL=${VIDEO_DETAIL_CACHE_TTL:-10}
+      - TRACING_OTLP_ENDPOINT=${TRACING_OTLP_ENDPOINT:-}
+    command:
+      - sh
+      - -c
+      - >-
+        if [ -z "$$DATABASE_URL" ]; then
+          export DATABASE_URL="postgresql+psycopg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@postgres:5432/$${POSTGRES_DB}";
+        fi;
+        if [ -z "$$REDIS_URL" ]; then
+          if [ -n "$$REDIS_PASSWORD" ]; then
+            export REDIS_URL="redis://:$${REDIS_PASSWORD}@redis:6379/0";
+          else
+            export REDIS_URL="redis://redis:6379/0";
+          fi;
+        fi;
+        uv run python -m app.core.migrate &&
+        exec uv run gunicorn app.main:app
+        -k uvicorn.workers.UvicornWorker
+        --bind 0.0.0.0:8000
+        --workers ${BACKEND_WEB_CONCURRENCY:-2}
+        --timeout ${BACKEND_GUNICORN_TIMEOUT:-120}
+        --graceful-timeout ${BACKEND_GUNICORN_GRACEFUL_TIMEOUT:-30}
+        --keep-alive ${BACKEND_GUNICORN_KEEPALIVE:-75}
+        --max-requests ${BACKEND_GUNICORN_MAX_REQUESTS:-1000}
+        --max-requests-jitter ${BACKEND_GUNICORN_MAX_REQUESTS_JITTER:-100}
+        --access-logfile -
+        --error-logfile -
+    volumes:
+      - ./backend/uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "uv",
+          "run",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    deploy:
+      resources:
+        limits:
+          cpus: "${BACKEND_CPU_LIMIT:-48.00}"
+          memory: ${BACKEND_MEMORY_LIMIT:-48G}
+        reservations:
+          cpus: "${BACKEND_CPU_RESERVATION:-4.00}"
+          memory: ${BACKEND_MEMORY_RESERVATION:-2G}
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+    container_name: youtube_clone_worker
+    profiles: ["prod"]
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-ci_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ci_password}
+      - POSTGRES_DB=${POSTGRES_DB:-youtube_clone}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_URL=${REDIS_URL:-}
+      - APP_ENV=${APP_ENV:-production}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-ci_jwt_secret_key_placeholder_min_32_chars}
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-4}
+      - DB_POOL_SIZE=${DB_POOL_SIZE:-5}
+      - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-5}
+      - DB_POOL_TIMEOUT=${DB_POOL_TIMEOUT:-30}
+      - DB_POOL_RECYCLE=${DB_POOL_RECYCLE:-1800}
+      - REDIS_MAX_CONNECTIONS=${REDIS_MAX_CONNECTIONS:-50}
+    command:
+      - sh
+      - -c
+      - >-
+        if [ -z "$$DATABASE_URL" ]; then
+          export DATABASE_URL="postgresql+psycopg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@postgres:5432/$${POSTGRES_DB}";
+        fi;
+        if [ -z "$$REDIS_URL" ]; then
+          if [ -n "$$REDIS_PASSWORD" ]; then
+            export REDIS_URL="redis://:$${REDIS_PASSWORD}@redis:6379/0";
+          else
+            export REDIS_URL="redis://redis:6379/0";
+          fi;
+        fi;
+        trap 'kill 0' TERM INT;
+        i=1;
+        while [ "$$i" -le "$${WORKER_CONCURRENCY:-4}" ]; do
+          uv run python -m app.worker &
+          i=$$((i + 1));
+        done;
+        wait
+    volumes:
+      - ./backend/uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "uv",
+          "run",
+          "python",
+          "-c",
+          "import os; from urllib.parse import quote; from redis import Redis; password = os.environ.get('REDIS_PASSWORD', ''); url = os.environ.get('REDIS_URL') or (f\"redis://:{quote(password, safe='')}@redis:6379/0\" if password else 'redis://redis:6379/0'); Redis.from_url(url).ping()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "${WORKER_CPU_LIMIT:-12.00}"
+          memory: ${WORKER_MEMORY_LIMIT:-16G}
+        reservations:
+          cpus: "${WORKER_CPU_RESERVATION:-2.00}"
+          memory: ${WORKER_MEMORY_RESERVATION:-1G}
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: youtube_clone_frontend
+    profiles: ["prod"]
+    environment:
+      - VITE_API_BASE_URL=/api
+      - VITE_API_PROXY_TARGET=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "fetch('http://localhost:5173').then((r)=>process.exit(r.ok ? 0 : 1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "${FRONTEND_CPU_LIMIT:-4.00}"
+          memory: ${FRONTEND_MEMORY_LIMIT:-4G}
+        reservations:
+          cpus: "${FRONTEND_CPU_RESERVATION:-0.25}"
+          memory: ${FRONTEND_MEMORY_RESERVATION:-128M}
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.99.0
+    container_name: youtube_clone_otel_collector
+    profiles: ["observe"]
+    # No depends_on backend: backend is under the `prod` profile and otel-collector is under
+    # `observe`. Cross-profile depends_on would prevent `--profile prod` from starting without
+    # also activating the observe profile. The backend will connect when both profiles are active.
+    volumes:
+      - ./observability/otel-collector.yml:/etc/otelcol-contrib/config.yaml:ro
+    expose:
+      - "4317"
+      - "4318"
+    depends_on:
+      - tempo
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: 128M
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.4.1
+    container_name: youtube_clone_tempo
+    profiles: ["observe"]
+    command: -config.file=/etc/tempo.yml
+    volumes:
+      - ./observability/tempo.yml:/etc/tempo.yml:ro
+    expose:
+      - "4317"
+      - "3200"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.30"
+          memory: 256M
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: youtube_clone_cadvisor
+    profiles: ["observe"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    expose:
+      - "8080"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: 128M
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: youtube_clone_prometheus
+    profiles: ["observe"]
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus_data:/prometheus
+    expose:
+      - "9090"
+    depends_on:
+      - cadvisor
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: youtube_clone_grafana
+    profiles: ["observe"]
+    expose:
+      - "3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost/grafana/}
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - tempo
+    deploy:
+      resources:
+        limits:
+          cpus: "0.30"
+          memory: 256M
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

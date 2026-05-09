@@ -1,0 +1,51 @@
+# =============================================================================
+# AWS DEPLOYMENT SETTINGS
+# =============================================================================
+# Copy this file to infra/envs/aws.tfvars and fill in your values.
+# Secrets (postgres_password, redis_password, jwt_secret_key, postgres_user)
+# are injected automatically from the root .env file — do NOT put them here.
+#
+# NEVER commit infra/envs/aws.tfvars to version control.
+# =============================================================================
+
+aws_region    = "us-east-2"
+project_name  = "youtube-clone"
+environment   = "prod"
+instance_type = "c6i.xlarge"
+
+# Leave empty to use the account default VPC and first public subnet.
+vpc_id    = ""
+subnet_id = ""
+
+# Set to true for a stable public IP (survives instance stop/start).
+create_eip = false
+
+# Set to an existing EC2 key pair name to enable SSH access.
+key_name        = ""
+ssh_cidr_blocks = []
+
+http_cidr_blocks = ["0.0.0.0/0"]
+
+# The EC2 instance clones this repository on first boot.
+repo_url = "https://github.com/YOUR_ORG/YOUR_REPO.git"
+repo_ref = "main"
+
+app_env     = "production"
+postgres_db = "youtube_clone"
+
+# c6i.xlarge = 4 vCPUs → 2 * vCPU + 1 = 9
+backend_web_concurrency = 9
+worker_concurrency      = 4
+root_volume_size_gb     = 60
+
+# Add the EC2 public IP after first apply so browsers can reach the API.
+cors_allow_origins = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost",
+  "http://127.0.0.1",
+]
+
+tags = {
+  Owner = "hackathon"
+}

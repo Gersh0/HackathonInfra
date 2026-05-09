@@ -1,0 +1,38 @@
+services:
+  nginx:
+    profiles: ["dev"]
+
+  postgres:
+    profiles: ["dev"]
+
+  redis:
+    profiles: ["dev"]
+
+  backend:
+    profiles: ["dev"]
+    environment:
+      - APP_ENV=development
+      - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-youtube}:${POSTGRES_PASSWORD:-youtube}@postgres:5432/${POSTGRES_DB:-youtube_clone}
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev_jwt_secret_key_placeholder_min_32_chars}
+    command: sh -c "uv run python -m app.core.migrate && uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+
+  worker:
+    profiles: ["dev"]
+    environment:
+      - APP_ENV=development
+      - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-youtube}:${POSTGRES_PASSWORD:-youtube}@postgres:5432/${POSTGRES_DB:-youtube_clone}
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev_jwt_secret_key_placeholder_min_32_chars}
+
+  frontend:
+    profiles: ["dev"]
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules

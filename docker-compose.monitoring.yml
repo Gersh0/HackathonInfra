@@ -1,0 +1,49 @@
+# docker-compose.monitoring.yml
+#
+# LOCAL monitoring stack — runs on your PC, NOT on the server.
+# Prometheus scrapes the remote server's /api/metrics endpoint.
+# Grafana visualises those metrics locally on port 3000.
+#
+# Do NOT use this file with `--profile`; it is a standalone file.
+# It is started automatically by run_stress_demo.sh.
+#
+# Manual usage:
+#   export PROMETHEUS_CONFIG_FILE=/tmp/prometheus_local_generated.yml
+#   docker compose -f docker-compose.monitoring.yml up -d
+
+services:
+  prometheus:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    image: prom/prometheus:v3.1.0
+    container_name: youtube_prometheus_local
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.enable-remote-write-receiver'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=1d'
+    volumes:
+      # Generated at runtime by run_stress_demo.sh with the remote server URL
+      - ./observability/prometheus/prometheus.local.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: youtube_grafana_local
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - grafana_local_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  grafana_local_data:

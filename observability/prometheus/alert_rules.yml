@@ -1,0 +1,48 @@
+groups:
+  - name: youtube_clone_api_alerts
+    interval: 30s
+    rules:
+      - alert: APIHighErrorRate
+        expr: |
+          (
+            sum(rate(api_requests_total{status_code=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(api_requests_total[5m])), 0.001)
+          ) > 0.02
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API 5xx error rate is above 2%"
+          description: "The API is returning elevated server errors for at least 5 minutes."
+
+      - alert: APIHighP95Latency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(api_request_latency_seconds_bucket[5m])) by (le)
+          ) > 0.4
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API p95 latency is above 400ms"
+          description: "Request latency SLO is degraded for at least 5 minutes."
+
+      - alert: QueueBacklogHigh
+        expr: sum(queue_depth) > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker queues are backlogged"
+          description: "Combined queue depth exceeded 100 jobs for at least 10 minutes."
+
+      - alert: APIInFlightRequestsHigh
+        expr: api_requests_in_progress > 200
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High in-flight request saturation"
+          description: "In-flight HTTP requests stayed above 200 for at least 5 minutes."

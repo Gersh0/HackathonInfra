@@ -1,0 +1,44 @@
+# =============================================================================
+# REMOTE LINUX SERVER DEPLOYMENT — SETTINGS
+# =============================================================================
+# Copy this file to infra/envs/remote.tfvars and fill in your values.
+# Secrets (passwords, JWT key) are injected automatically from the root .env
+# file by the deploy script — do NOT put them here.
+#
+# Requirements on the remote server:
+#   - Ubuntu 20.04+ (Docker will be installed automatically if missing)
+#   - SSH access with a user that has sudo privileges
+#   - Ports 80 (HTTP) and 22 (SSH) open in the server firewall
+#
+# NEVER commit infra/envs/remote.tfvars to version control.
+# =============================================================================
+
+# Remote server connection
+host                 = "your-server-ip-or-hostname"
+ssh_user             = "ubuntu"
+ssh_private_key_path = "/home/your-user/.ssh/id_rsa"
+ssh_port             = 22
+
+# Application source
+repo_url = "https://github.com/YOUR_ORG/YOUR_REPO.git"
+repo_ref = "main"
+
+# Deployment profile: "dev" or "prod"
+profile  = "prod"
+app_env  = "production"
+
+# Database name (user/password come from .env)
+postgres_db = "youtube_clone"
+
+# Concurrency — tune to available server CPUs
+# Formula: 2 * vCPU + 1
+backend_web_concurrency = 4
+worker_concurrency      = 2
+
+# Add the server's public IP once known
+cors_allow_origins = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost",
+  "http://127.0.0.1",
+]
