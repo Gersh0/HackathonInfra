@@ -334,6 +334,270 @@ function Import-HwProfile {
     }
 }
 
+
+# ─── Hardware requirement validation helpers ─────────────────────────────────
+
+function Read-EnvFileMap {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $map = @{}
+    if (-not (Test-Path $Path)) { return $map }
+
+    Get-Content $Path -ErrorAction SilentlyContinue | ForEach-Object {
+        $line = $_.Trim()
+        if (-not $line) { return }
+        if ($line.StartsWith('#')) { return }
+        if ($line.StartsWith('export ')) { $line = $line.Substring(7).Trim() }
+
+        $eqIdx = $line.IndexOf('=')
+        if ($eqIdx -lt 1) { return }
+
+        $key = $line.Substring(0, $eqIdx).Trim()
+        $value = $line.Substring($eqIdx + 1).Trim()
+
+        if ($value.Length -ge 2) {
+            $startsQuoted = ($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))
+            if ($startsQuoted) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+        }
+
+        $map[$key] = $value
+    }
+
+    return $map
+}
+
+function ConvertTo-CpuValue {
+    param([string]$Raw)
+
+    if ([string]::IsNullOrWhiteSpace($Raw)) { return $null }
+
+    $clean = $Raw.Trim().ToLowerInvariant().Replace(',', '.')
+    if ($clean -match '^(?<v>\d+(?:\.\d+)?)\s*(?<u>cpu|cpus|vcpu|vcpus|core|cores)?$') {
+        return [double]$Matches['v']
+    }
+
+    return $null
+}
+
+function ConvertTo-MemoryMbValue {
+    param([string]$Raw)
+
+    if ([string]::IsNullOrWhiteSpace($Raw)) { return $null }
+
+    $clean = $Raw.Trim().ToLowerInvariant().Replace(',', '.')
+    if ($clean -match '^(?<v>\d+(?:\.\d+)?)(?<u>tb|t|gb|g|mb|m|kb|k)?$') {
+        $v = [double]$Matches['v']
+        switch ($Matches['u']) {
+            'tb' { return [int]([math]::Round($v * 1024 * 1024)) }
+            't'  { return [int]([math]::Round($v * 1024 * 1024)) }
+            'gb' { return [int]([math]::Round($v * 1024)) }
+            'g'  { return [int]([math]::Round($v * 1024)) }
+            'kb' { return [int]([math]::Round($v / 1024)) }
+            'k'  { return [int]([math]::Round($v / 1024)) }
+            'mb' { return [int]([math]::Round($v)) }
+            'm'  { return [int]([math]::Round($v)) }
+            default { return [int]([math]::Round($v)) }
+        }
+    }
+
+    return $null
+}
+
+function Get-ResourceSummaryFromMap {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][hashtable]$Map
+    )
+
+    $summary = [ordered]@{
+        Name         = $Name
+        CpuLimits    = @{}
+        MemoryLimits = @{}
+        TotalCpu     = 0.0
+        TotalMemoryMb = 0
+        MaxCpu       = 0.0
+        MaxMemoryMb  = 0
+    }
+
+    $cpuKeys = @($Map.Keys | Where-Object { $_ -match '_CPU_LIMIT$' } | Sort-Object)
+    foreach ($cpuKey in $cpuKeys) {
+        $cpuVal = ConvertTo-CpuValue $Map[$cpuKey]
+        if ($null -ne $cpuVal) {
+            $summary.CpuLimits[$cpuKey] = [double]$cpuVal
+            $summary.TotalCpu += [double]$cpuVal
+            if ([double]$cpuVal -gt [double]$summary.MaxCpu) { $summary.MaxCpu = [double]$cpuVal }
+        }
+
+        $memKey = $cpuKey -replace '_CPU_LIMIT$', '_MEMORY_LIMIT'
+        if ($Map.ContainsKey($memKey)) {
+            $memVal = ConvertTo-MemoryMbValue $Map[$memKey]
+            if ($null -ne $memVal) {
+                $summary.MemoryLimits[$memKey] = [int]$memVal
+                $summary.TotalMemoryMb += [int]$memVal
+                if ([int]$memVal -gt [int]$summary.MaxMemoryMb) { $summary.MaxMemoryMb = [int]$memVal }
+            }
+        }
+    }
+
+    return $summary
+}
+
+function Get-ProcessEnvMap {
+    $map = @{}
+    [System.Environment]::GetEnvironmentVariables('Process').GetEnumerator() | ForEach-Object {
+        $map[[string]$_.Key] = [string]$_.Value
+    }
+    return $map
+}
+
+function Get-DockerCapacity {
+    $hostCpu = [double][Environment]::ProcessorCount
+    $hostMemMb = [int]((Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1MB)
+
+    $dockerCpu = $null
+    $dockerMemMb = $null
+
+    if (Get-Command docker -ErrorAction SilentlyContinue) {
+        $dockerInfo = & cmd /c 'docker info --format "{{.NCPU}} {{.MemTotal}}" 2>nul'
+        if ($LASTEXITCODE -eq 0 -and $dockerInfo) {
+            $parts = $dockerInfo.Trim() -split '\s+'
+            if ($parts.Count -ge 2) {
+                try { $dockerCpu = [double]$parts[0] } catch { $dockerCpu = $null }
+                try { $dockerMemMb = [int]([double]$parts[1] / 1MB) } catch { $dockerMemMb = $null }
+            }
+        }
+    }
+
+    return [ordered]@{
+        HostCpu       = $hostCpu
+        HostMemoryMb  = $hostMemMb
+        DockerCpu     = $dockerCpu
+        DockerMemoryMb = $dockerMemMb
+    }
+}
+
+function Get-HwTierCatalog {
+    $catalog = @()
+    foreach ($tier in @('tiny', 'small', 'medium', 'large')) {
+        $path = Join-Path $InfraDir "envs\hw-$tier.env"
+        if (Test-Path $path) {
+            $catalog += (Get-ResourceSummaryFromMap -Name $tier -Map (Read-EnvFileMap -Path $path))
+        }
+    }
+    return $catalog
+}
+
+function Get-BestFittingTier {
+    param(
+        [Parameter(Mandatory = $true)]$Capacity,
+        [Parameter(Mandatory = $true)][object[]]$Catalog
+    )
+
+    $fits = @()
+    foreach ($tier in $Catalog) {
+        if ($null -eq $tier) { continue }
+        if ($tier.TotalCpu -le $Capacity.DockerCpu -and $tier.TotalCpu -le $Capacity.HostCpu -and
+            $tier.TotalMemoryMb -le $Capacity.DockerMemoryMb -and $tier.TotalMemoryMb -le $Capacity.HostMemoryMb) {
+            $score = [double]$tier.TotalCpu + ([double]$tier.TotalMemoryMb / 1024)
+            $fits += [pscustomobject]@{ Tier = $tier; Score = $score }
+        }
+    }
+
+    if ($fits.Count -eq 0) { return $null }
+    return ($fits | Sort-Object Score -Descending | Select-Object -First 1).Tier
+}
+
+function Assert-HardwareRequirements {
+    if ($Target -ne 'local') { return }
+
+    $sourceMap = if ($Hw) {
+        Get-ProcessEnvMap
+    } else {
+        Read-EnvFileMap -Path (Join-Path $ProjectRoot '.env')
+    }
+
+    $activeProfile = Get-ResourceSummaryFromMap -Name ($(if ($Hw) { $Hw } else { '.env' })) -Map $sourceMap
+    if ($activeProfile.CpuLimits.Count -eq 0 -and $activeProfile.MemoryLimits.Count -eq 0) {
+        Write-Host "[INFO]    No *_CPU_LIMIT / *_MEMORY_LIMIT values found for validation. Skipping hardware preflight."
+        return
+    }
+
+    $capacity = Get-DockerCapacity
+    if ($null -eq $capacity.DockerCpu -or $null -eq $capacity.DockerMemoryMb) {
+        throw "Unable to detect Docker CPU/memory capacity. Verify Docker Desktop is running and `docker info` is available."
+    }
+
+    $violations = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in $activeProfile.CpuLimits.GetEnumerator()) {
+        $name = [string]$entry.Key
+        $req  = [double]$entry.Value
+        if ($req -gt [double]$capacity.HostCpu) {
+            [void]$violations.Add("$name requires $req CPUs, but the host only has $([int]$capacity.HostCpu) available.")
+        }
+        if ($req -gt [double]$capacity.DockerCpu) {
+            [void]$violations.Add("$name requires $req CPUs, but Docker exposes only $([string]::Format('{0:0.##}', $capacity.DockerCpu)) CPUs.")
+        }
+    }
+
+    foreach ($entry in $activeProfile.MemoryLimits.GetEnumerator()) {
+        $name = [string]$entry.Key
+        $req  = [int]$entry.Value
+        if ($req -gt [int]$capacity.HostMemoryMb) {
+            [void]$violations.Add("$name requires ${req}MB RAM, but the host only has $($capacity.HostMemoryMb)MB available.")
+        }
+        if ($req -gt [int]$capacity.DockerMemoryMb) {
+            [void]$violations.Add("$name requires ${req}MB RAM, but Docker exposes only $($capacity.DockerMemoryMb)MB.")
+        }
+    }
+
+    if ($violations.Count -gt 0) {
+        $catalog = Get-HwTierCatalog
+        $recommended = Get-BestFittingTier -Capacity $capacity -Catalog $catalog
+        $recommendedText = if ($recommended) { "Recommended tier: -Hw $($recommended.Name)." } else { "Recommended tier: use -Hw auto or a smaller tier such as -Hw tiny." }
+
+        $details = ($violations | Sort-Object -Unique) -join "`n- "
+        throw @"
+Selected hardware profile '$($(if ($Hw) { $Hw } else { '.env' }))' cannot be deployed with the current hardware.
+
+Detected hardware:
+- Host:   $([int]$capacity.HostCpu) vCPU / $($capacity.HostMemoryMb) MB RAM
+- Docker: $([string]::Format('{0:0.##}', $capacity.DockerCpu)) vCPU / $($capacity.DockerMemoryMb) MB RAM
+
+Violations:
+- $details
+
+How to fix it:
+- Increase Docker Desktop CPU and memory limits, or adjust `.wslconfig` if you are using WSL2.
+- Choose a smaller tier or use -Hw auto.
+- $recommendedText
+"@
+    }
+
+    if ($Hw -and $Hw -ne 'auto') {
+        $tierPath = Join-Path $InfraDir "envs\hw-$Hw.env"
+        if (Test-Path $tierPath) {
+            $tierProfile = Get-ResourceSummaryFromMap -Name $Hw -Map (Read-EnvFileMap -Path $tierPath)
+            $hostBigger = ($capacity.HostCpu -ge ($tierProfile.TotalCpu * 1.15)) -and ($capacity.HostMemoryMb -ge ($tierProfile.TotalMemoryMb * 1.15))
+            $dockerBigger = ($capacity.DockerCpu -ge ($tierProfile.TotalCpu * 1.15)) -and ($capacity.DockerMemoryMb -ge ($tierProfile.TotalMemoryMb * 1.15))
+
+            if ($hostBigger -and $dockerBigger) {
+                $catalog = Get-HwTierCatalog
+                $recommended = Get-BestFittingTier -Capacity $capacity -Catalog $catalog
+                $recommendedText = if ($recommended) { "-Hw $($recommended.Name)" } else { '-Hw auto' }
+
+                Write-Warning "The selected tier '$Hw' is smaller than the available hardware."
+                Write-Warning "Recommended option: $recommendedText"
+                $answer = Read-Host "Proceed anyway with tier '$Hw'? [y/N]"
+                if ($answer -notmatch '^(?i:y|yes)$') {
+                    throw 'Deployment cancelled by user.'
+                }
+            }
+        }
+    }
+}
+
 # ─── Dependency checker ──────────────────────────────────────────────────────
 
 function Install-Terraform {
@@ -425,7 +689,7 @@ function Test-Dependencies {
             Install-Docker  # exits after install; user must restart/re-run
         }
 
-        docker info 2>&1 | Out-Null
+        cmd /c 'docker info >nul 2>nul'
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[STOPPED] Docker daemon is not running — attempting to start Docker Desktop..."
             $dockerExe = Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
@@ -435,11 +699,11 @@ function Test-Dependencies {
                 $deadline = (Get-Date).AddSeconds(30)
                 while ((Get-Date) -lt $deadline) {
                     Start-Sleep -Seconds 3
-                    docker info 2>&1 | Out-Null
+                    cmd /c 'docker info >nul 2>nul'
                     if ($LASTEXITCODE -eq 0) { break }
                 }
             }
-            docker info 2>&1 | Out-Null
+            cmd /c 'docker info >nul 2>nul'
             if ($LASTEXITCODE -ne 0) {
                 Write-Warning "[ERROR]   Docker daemon still not reachable. Start Docker Desktop manually and retry."
                 $errors++
@@ -450,7 +714,7 @@ function Test-Dependencies {
             Write-Host "[OK]      $(docker --version)"
         }
 
-        docker compose version 2>&1 | Out-Null
+        cmd /c 'docker compose version >nul 2>nul'
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "[MISSING] docker compose plugin — included with Docker Desktop; ensure it is up to date."
             $errors++
@@ -652,6 +916,8 @@ function Deploy-Local {
         Write-Error ".env not found. Run: Copy-Item .env.template .env"
         exit 1
     }
+
+    Assert-HardwareRequirements
 
     $composeFiles = if ($Profile -eq "dev") {
         "-f docker-compose.yml -f docker-compose.dev.yml"
