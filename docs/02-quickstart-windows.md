@@ -24,8 +24,8 @@ This guide gets the application running on Windows using **Docker Desktop** (rec
 Open **PowerShell** or **Git Bash** and run:
 
 ```powershell
-git clone <your-repo-url>
-cd HackathonChallengeYoutubeClone-main
+git clone https://github.com/Gersh0/HackathonInfra.git
+cd HackathonInfra
 ```
 
 ---
