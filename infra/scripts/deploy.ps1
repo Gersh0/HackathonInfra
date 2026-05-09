@@ -680,132 +680,85 @@ function Install-AwsCli {
 function Test-Dependencies {
     Write-Host ""
     Write-Host "==> Checking dependencies..."
-    $errors = 0
 
-    # ── Docker + Compose (local target only) ─────────────────────────────────
-    if ($Target -eq "local") {
-        if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-            Write-Host "[MISSING] docker — auto-installing..."
-            Install-Docker  # exits after install; user must restart/re-run
-        }
+    $issues = New-Object System.Collections.Generic.List[string]
 
-        cmd /c 'docker info >nul 2>nul'
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "[STOPPED] Docker daemon is not running — attempting to start Docker Desktop..."
-            $dockerExe = Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
-            if (Test-Path $dockerExe) {
-                Start-Process $dockerExe
-                Write-Host "          Waiting up to 30 seconds for Docker to become ready..."
-                $deadline = (Get-Date).AddSeconds(30)
-                while ((Get-Date) -lt $deadline) {
-                    Start-Sleep -Seconds 3
-                    cmd /c 'docker info >nul 2>nul'
-                    if ($LASTEXITCODE -eq 0) { break }
+    function Add-Issue {
+        param([string]$Message)
+        [void]$issues.Add($Message)
+    }
+
+    switch ($Target) {
+        "local" {
+            if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+                Add-Issue "Docker is required for target 'local'. Install Docker Desktop and try again."
+            } else {
+                cmd /c "docker info >nul 2>nul"
+                if ($LASTEXITCODE -ne 0) {
+                    Add-Issue "Docker Desktop is installed but the daemon is not ready. Start Docker Desktop and retry."
+                }
+
+                cmd /c "docker compose version >nul 2>nul"
+                if ($LASTEXITCODE -ne 0) {
+                    Add-Issue "Docker Compose plugin is missing or unavailable. Update Docker Desktop."
                 }
             }
-            cmd /c 'docker info >nul 2>nul'
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warning "[ERROR]   Docker daemon still not reachable. Start Docker Desktop manually and retry."
-                $errors++
+
+            $envFile = Join-Path $ProjectRoot ".env"
+            if (-not (Test-Path $envFile)) {
+                Add-Issue ".env is missing. Copy .env.template to .env and fill in the required values."
             } else {
-                Write-Host "[OK]      Docker daemon started"
+                $jwtLine = Get-Content $envFile | Where-Object { $_ -match "^JWT_SECRET_KEY=" } | Select-Object -First 1
+                $jwtKey  = if ($jwtLine) { ($jwtLine -split "=", 2)[1].Trim().Trim('"').Trim("'") } else { "" }
+                if (-not $jwtKey -or $jwtKey -eq "REPLACE_WITH_STRONG_SECRET_MIN_32_CHARS" -or $jwtKey.Length -lt 32) {
+                    Add-Issue ".env: JWT_SECRET_KEY is missing, too short, or still using the template placeholder."
+                }
+
+                $pgLine = Get-Content $envFile | Where-Object { $_ -match "^POSTGRES_PASSWORD=" } | Select-Object -First 1
+                $pgPass = if ($pgLine) { ($pgLine -split "=", 2)[1].Trim().Trim('"').Trim("'") } else { "" }
+                if (-not $pgPass -or $pgPass -eq "StrongPassword12!") {
+                    Add-Issue ".env: POSTGRES_PASSWORD is empty or still using the template default."
+                }
             }
-        } else {
-            Write-Host "[OK]      $(docker --version)"
+
+            # Target-specific hardware checks for local should happen here only.
+            # Do not read AWS files, AWS CLI, or AWS credentials in this branch.
         }
 
-        cmd /c 'docker compose version >nul 2>nul'
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "[MISSING] docker compose plugin — included with Docker Desktop; ensure it is up to date."
-            $errors++
-        } else {
-            Write-Host "[OK]      $(docker compose version)"
-        }
-    }
-
-    # ── Terraform (all targets) ───────────────────────────────────────────────
-    if (Get-Command terraform -ErrorAction SilentlyContinue) {
-        $tfVerRaw = $null
-        try {
-            $tfJson   = terraform version -json 2>$null | ConvertFrom-Json -ErrorAction Stop
-            $tfVerRaw = $tfJson.terraform_version
-        } catch {
-            $m = (terraform version 2>$null | Select-String -Pattern '\d+\.\d+\.\d+').Matches
-            if ($m.Count -gt 0) { $tfVerRaw = $m[0].Value }
-        }
-
-        if ($tfVerRaw -and ([version]$tfVerRaw -ge $TerraformMin)) {
-            Write-Host "[OK]      terraform $tfVerRaw"
-        } else {
-            Write-Warning "[OLD]     terraform $tfVerRaw < $TerraformMin — auto-installing $TerraformInstall..."
-            Install-Terraform
-        }
-    } else {
-        Write-Host "[MISSING] terraform — auto-installing $TerraformInstall..."
-        Install-Terraform
-    }
-
-    # ── .env file and required values (all targets) ─────────────────────────
-    $envFile = Join-Path $ProjectRoot ".env"
-    if (-not (Test-Path $envFile)) {
-        Write-Warning "[MISSING] .env — copy the template and fill in your values:"
-        Write-Warning "          Copy-Item .env.template .env"
-        $errors++
-    } else {
-        $jwtLine = Get-Content $envFile | Where-Object { $_ -match "^JWT_SECRET_KEY=" } | Select-Object -First 1
-        $jwtKey  = if ($jwtLine) { ($jwtLine -split "=", 2)[1].Trim().Trim('"').Trim("'") } else { "" }
-        if (-not $jwtKey -or $jwtKey -eq "REPLACE_WITH_STRONG_SECRET_MIN_32_CHARS" -or $jwtKey.Length -lt 32) {
-            Write-Warning "[INVALID] .env: JWT_SECRET_KEY is missing, too short (< 32 chars), or still the template placeholder."
-            Write-Warning "          Generate: python -c `"import secrets; print(secrets.token_urlsafe(48))`""
-            $errors++
-        } else {
-            Write-Host "[OK]      .env (JWT_SECRET_KEY set)"
-        }
-
-        $pgLine = Get-Content $envFile | Where-Object { $_ -match "^POSTGRES_PASSWORD=" } | Select-Object -First 1
-        $pgPass = if ($pgLine) { ($pgLine -split "=", 2)[1].Trim().Trim('"').Trim("'") } else { "" }
-        if (-not $pgPass -or $pgPass -eq "StrongPassword12!") {
-            Write-Warning "[INVALID] .env: POSTGRES_PASSWORD is empty or still the template default (StrongPassword12!)."
-            $errors++
-        }
-    }
-
-    # ── AWS CLI + credentials (aws target) ───────────────────────────────────
-    if ($Target -eq "aws") {
-        if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
-            Write-Host "[MISSING] aws CLI — auto-installing..."
-            Install-AwsCli
-        }
-        if (Get-Command aws -ErrorAction SilentlyContinue) {
-            Write-Host "[OK]      $(aws --version 2>&1)"
-            aws sts get-caller-identity 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warning "[INVALID] AWS credentials not configured or expired."
-                Write-Warning "          Run: aws configure   (or set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)"
-                $errors++
+        "aws" {
+            if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+                Add-Issue "AWS CLI is required for target 'aws'. Install it and run 'aws configure'."
             } else {
-                $acct = (aws sts get-caller-identity --query Account --output text 2>$null)
-                Write-Host "[OK]      AWS account $acct"
+                cmd /c "aws sts get-caller-identity >nul 2>nul"
+                if ($LASTEXITCODE -ne 0) {
+                    Add-Issue "AWS credentials are missing, invalid, or expired. Run 'aws configure' or set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY."
+                }
             }
-        } else {
-            Write-Warning "[ERROR]   aws CLI still not found after install attempt."
-            $errors++
+
+            $varFile = Join-Path $InfraDir "envs\aws.tfvars"
+            if (-not (Test-Path $varFile)) {
+                Add-Issue "$varFile not found. Copy aws.tfvars.example and fill in the required values."
+            }
+        }
+
+        "remote" {
+            if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
+                Add-Issue "SSH client is required for target 'remote'. Enable OpenSSH Client on Windows."
+            }
+
+            $varFile = Join-Path $InfraDir "envs\remote.tfvars"
+            if (-not (Test-Path $varFile)) {
+                Add-Issue "$varFile not found. Copy remote.tfvars.example and fill in the required values."
+            }
+        }
+
+        default {
+            Add-Issue "Unsupported target: $Target"
         }
     }
 
-    # ── SSH client (remote target) ────────────────────────────────────────────
-    if ($Target -eq "remote") {
-        if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
-            Write-Warning "[MISSING] ssh — enable via: Settings > System > Optional features > OpenSSH Client"
-            $errors++
-        } else {
-            Write-Host "[OK]      ssh"
-        }
-    }
-
-    if ($errors -gt 0) {
-        Write-Error "$errors dependency check(s) failed. Resolve the issues above and retry."
-        exit 1
+    if ($issues.Count -gt 0) {
+        throw ($issues -join "`n")
     }
 
     Write-Host "==> All dependencies satisfied."
