@@ -59,6 +59,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Ensure consistent UTF-8 behavior in Windows PowerShell
+try {
+    [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new($false)
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $OutputEncoding           = [System.Text.UTF8Encoding]::new($false)
+} catch {
+    Write-Warning "Unable to set UTF-8 console encodings. Continuing with the system defaults."
+}
+try { cmd /c "chcp 65001 >nul" | Out-Null } catch { }
+
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Warning "PowerShell 7+ is recommended for consistent UTF-8 behavior."
+}
+
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
 $InfraDir    = Join-Path $ProjectRoot "infra"
@@ -125,7 +139,7 @@ function Invoke-HwAutoDetect {
         }
         "aws" {
             $varFile = Join-Path $InfraDir "envs\aws.tfvars"
-            $line = Get-Content $varFile -ErrorAction SilentlyContinue |
+            $line = Get-Content -Path $varFile -Encoding UTF8 -ErrorAction SilentlyContinue |
                     Where-Object { $_ -match 'instance_type' } |
                     Select-Object -First 1
             $instanceType = if ($line) {
@@ -156,7 +170,7 @@ function Invoke-HwAutoDetect {
             $varFile = Join-Path $InfraDir "envs\remote.tfvars"
             $getField = {
                 param([string]$pattern)
-                $l = Get-Content $varFile -ErrorAction SilentlyContinue |
+                $l = Get-Content -Path $varFile -Encoding UTF8 -ErrorAction SilentlyContinue |
                      Where-Object { $_ -match $pattern } | Select-Object -First 1
                 if ($l) { [regex]::Match($l, '"([^"]*)"').Groups[1].Value } else { "" }
             }
@@ -315,7 +329,7 @@ function Import-HwProfile {
 
     Write-Host "==> Loading hardware profile: $Hw ($hwFile)"
 
-    Get-Content $hwFile | ForEach-Object {
+    Get-Content -Path $hwFile -Encoding UTF8 | ForEach-Object {
         $line = $_.Trim()
         if ($line -match "^#" -or $line -eq "") { return }
 
@@ -331,270 +345,6 @@ function Import-HwProfile {
         # Export as TF_VAR_<lowercase> for Terraform
         $tfKey = "TF_VAR_$($key.ToLower())"
         [System.Environment]::SetEnvironmentVariable($tfKey, $value, "Process")
-    }
-}
-
-
-# ─── Hardware requirement validation helpers ─────────────────────────────────
-
-function Read-EnvFileMap {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    $map = @{}
-    if (-not (Test-Path $Path)) { return $map }
-
-    Get-Content $Path -ErrorAction SilentlyContinue | ForEach-Object {
-        $line = $_.Trim()
-        if (-not $line) { return }
-        if ($line.StartsWith('#')) { return }
-        if ($line.StartsWith('export ')) { $line = $line.Substring(7).Trim() }
-
-        $eqIdx = $line.IndexOf('=')
-        if ($eqIdx -lt 1) { return }
-
-        $key = $line.Substring(0, $eqIdx).Trim()
-        $value = $line.Substring($eqIdx + 1).Trim()
-
-        if ($value.Length -ge 2) {
-            $startsQuoted = ($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))
-            if ($startsQuoted) {
-                $value = $value.Substring(1, $value.Length - 2)
-            }
-        }
-
-        $map[$key] = $value
-    }
-
-    return $map
-}
-
-function ConvertTo-CpuValue {
-    param([string]$Raw)
-
-    if ([string]::IsNullOrWhiteSpace($Raw)) { return $null }
-
-    $clean = $Raw.Trim().ToLowerInvariant().Replace(',', '.')
-    if ($clean -match '^(?<v>\d+(?:\.\d+)?)\s*(?<u>cpu|cpus|vcpu|vcpus|core|cores)?$') {
-        return [double]$Matches['v']
-    }
-
-    return $null
-}
-
-function ConvertTo-MemoryMbValue {
-    param([string]$Raw)
-
-    if ([string]::IsNullOrWhiteSpace($Raw)) { return $null }
-
-    $clean = $Raw.Trim().ToLowerInvariant().Replace(',', '.')
-    if ($clean -match '^(?<v>\d+(?:\.\d+)?)(?<u>tb|t|gb|g|mb|m|kb|k)?$') {
-        $v = [double]$Matches['v']
-        switch ($Matches['u']) {
-            'tb' { return [int]([math]::Round($v * 1024 * 1024)) }
-            't'  { return [int]([math]::Round($v * 1024 * 1024)) }
-            'gb' { return [int]([math]::Round($v * 1024)) }
-            'g'  { return [int]([math]::Round($v * 1024)) }
-            'kb' { return [int]([math]::Round($v / 1024)) }
-            'k'  { return [int]([math]::Round($v / 1024)) }
-            'mb' { return [int]([math]::Round($v)) }
-            'm'  { return [int]([math]::Round($v)) }
-            default { return [int]([math]::Round($v)) }
-        }
-    }
-
-    return $null
-}
-
-function Get-ResourceSummaryFromMap {
-    param(
-        [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][hashtable]$Map
-    )
-
-    $summary = [ordered]@{
-        Name         = $Name
-        CpuLimits    = @{}
-        MemoryLimits = @{}
-        TotalCpu     = 0.0
-        TotalMemoryMb = 0
-        MaxCpu       = 0.0
-        MaxMemoryMb  = 0
-    }
-
-    $cpuKeys = @($Map.Keys | Where-Object { $_ -match '_CPU_LIMIT$' } | Sort-Object)
-    foreach ($cpuKey in $cpuKeys) {
-        $cpuVal = ConvertTo-CpuValue $Map[$cpuKey]
-        if ($null -ne $cpuVal) {
-            $summary.CpuLimits[$cpuKey] = [double]$cpuVal
-            $summary.TotalCpu += [double]$cpuVal
-            if ([double]$cpuVal -gt [double]$summary.MaxCpu) { $summary.MaxCpu = [double]$cpuVal }
-        }
-
-        $memKey = $cpuKey -replace '_CPU_LIMIT$', '_MEMORY_LIMIT'
-        if ($Map.ContainsKey($memKey)) {
-            $memVal = ConvertTo-MemoryMbValue $Map[$memKey]
-            if ($null -ne $memVal) {
-                $summary.MemoryLimits[$memKey] = [int]$memVal
-                $summary.TotalMemoryMb += [int]$memVal
-                if ([int]$memVal -gt [int]$summary.MaxMemoryMb) { $summary.MaxMemoryMb = [int]$memVal }
-            }
-        }
-    }
-
-    return $summary
-}
-
-function Get-ProcessEnvMap {
-    $map = @{}
-    [System.Environment]::GetEnvironmentVariables('Process').GetEnumerator() | ForEach-Object {
-        $map[[string]$_.Key] = [string]$_.Value
-    }
-    return $map
-}
-
-function Get-DockerCapacity {
-    $hostCpu = [double][Environment]::ProcessorCount
-    $hostMemMb = [int]((Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1MB)
-
-    $dockerCpu = $null
-    $dockerMemMb = $null
-
-    if (Get-Command docker -ErrorAction SilentlyContinue) {
-        $dockerInfo = & cmd /c 'docker info --format "{{.NCPU}} {{.MemTotal}}" 2>nul'
-        if ($LASTEXITCODE -eq 0 -and $dockerInfo) {
-            $parts = $dockerInfo.Trim() -split '\s+'
-            if ($parts.Count -ge 2) {
-                try { $dockerCpu = [double]$parts[0] } catch { $dockerCpu = $null }
-                try { $dockerMemMb = [int]([double]$parts[1] / 1MB) } catch { $dockerMemMb = $null }
-            }
-        }
-    }
-
-    return [ordered]@{
-        HostCpu       = $hostCpu
-        HostMemoryMb  = $hostMemMb
-        DockerCpu     = $dockerCpu
-        DockerMemoryMb = $dockerMemMb
-    }
-}
-
-function Get-HwTierCatalog {
-    $catalog = @()
-    foreach ($tier in @('tiny', 'small', 'medium', 'large')) {
-        $path = Join-Path $InfraDir "envs\hw-$tier.env"
-        if (Test-Path $path) {
-            $catalog += (Get-ResourceSummaryFromMap -Name $tier -Map (Read-EnvFileMap -Path $path))
-        }
-    }
-    return $catalog
-}
-
-function Get-BestFittingTier {
-    param(
-        [Parameter(Mandatory = $true)]$Capacity,
-        [Parameter(Mandatory = $true)][object[]]$Catalog
-    )
-
-    $fits = @()
-    foreach ($tier in $Catalog) {
-        if ($null -eq $tier) { continue }
-        if ($tier.TotalCpu -le $Capacity.DockerCpu -and $tier.TotalCpu -le $Capacity.HostCpu -and
-            $tier.TotalMemoryMb -le $Capacity.DockerMemoryMb -and $tier.TotalMemoryMb -le $Capacity.HostMemoryMb) {
-            $score = [double]$tier.TotalCpu + ([double]$tier.TotalMemoryMb / 1024)
-            $fits += [pscustomobject]@{ Tier = $tier; Score = $score }
-        }
-    }
-
-    if ($fits.Count -eq 0) { return $null }
-    return ($fits | Sort-Object Score -Descending | Select-Object -First 1).Tier
-}
-
-function Assert-HardwareRequirements {
-    if ($Target -ne 'local') { return }
-
-    $sourceMap = if ($Hw) {
-        Get-ProcessEnvMap
-    } else {
-        Read-EnvFileMap -Path (Join-Path $ProjectRoot '.env')
-    }
-
-    $activeProfile = Get-ResourceSummaryFromMap -Name ($(if ($Hw) { $Hw } else { '.env' })) -Map $sourceMap
-    if ($activeProfile.CpuLimits.Count -eq 0 -and $activeProfile.MemoryLimits.Count -eq 0) {
-        Write-Host "[INFO]    No *_CPU_LIMIT / *_MEMORY_LIMIT values found for validation. Skipping hardware preflight."
-        return
-    }
-
-    $capacity = Get-DockerCapacity
-    if ($null -eq $capacity.DockerCpu -or $null -eq $capacity.DockerMemoryMb) {
-        throw "Unable to detect Docker CPU/memory capacity. Verify Docker Desktop is running and `docker info` is available."
-    }
-
-    $violations = New-Object System.Collections.Generic.List[string]
-    foreach ($entry in $activeProfile.CpuLimits.GetEnumerator()) {
-        $name = [string]$entry.Key
-        $req  = [double]$entry.Value
-        if ($req -gt [double]$capacity.HostCpu) {
-            [void]$violations.Add("$name requires $req CPUs, but the host only has $([int]$capacity.HostCpu) available.")
-        }
-        if ($req -gt [double]$capacity.DockerCpu) {
-            [void]$violations.Add("$name requires $req CPUs, but Docker exposes only $([string]::Format('{0:0.##}', $capacity.DockerCpu)) CPUs.")
-        }
-    }
-
-    foreach ($entry in $activeProfile.MemoryLimits.GetEnumerator()) {
-        $name = [string]$entry.Key
-        $req  = [int]$entry.Value
-        if ($req -gt [int]$capacity.HostMemoryMb) {
-            [void]$violations.Add("$name requires ${req}MB RAM, but the host only has $($capacity.HostMemoryMb)MB available.")
-        }
-        if ($req -gt [int]$capacity.DockerMemoryMb) {
-            [void]$violations.Add("$name requires ${req}MB RAM, but Docker exposes only $($capacity.DockerMemoryMb)MB.")
-        }
-    }
-
-    if ($violations.Count -gt 0) {
-        $catalog = Get-HwTierCatalog
-        $recommended = Get-BestFittingTier -Capacity $capacity -Catalog $catalog
-        $recommendedText = if ($recommended) { "Recommended tier: -Hw $($recommended.Name)." } else { "Recommended tier: use -Hw auto or a smaller tier such as -Hw tiny." }
-
-        $details = ($violations | Sort-Object -Unique) -join "`n- "
-        throw @"
-Selected hardware profile '$($(if ($Hw) { $Hw } else { '.env' }))' cannot be deployed with the current hardware.
-
-Detected hardware:
-- Host:   $([int]$capacity.HostCpu) vCPU / $($capacity.HostMemoryMb) MB RAM
-- Docker: $([string]::Format('{0:0.##}', $capacity.DockerCpu)) vCPU / $($capacity.DockerMemoryMb) MB RAM
-
-Violations:
-- $details
-
-How to fix it:
-- Increase Docker Desktop CPU and memory limits, or adjust `.wslconfig` if you are using WSL2.
-- Choose a smaller tier or use -Hw auto.
-- $recommendedText
-"@
-    }
-
-    if ($Hw -and $Hw -ne 'auto') {
-        $tierPath = Join-Path $InfraDir "envs\hw-$Hw.env"
-        if (Test-Path $tierPath) {
-            $tierProfile = Get-ResourceSummaryFromMap -Name $Hw -Map (Read-EnvFileMap -Path $tierPath)
-            $hostBigger = ($capacity.HostCpu -ge ($tierProfile.TotalCpu * 1.15)) -and ($capacity.HostMemoryMb -ge ($tierProfile.TotalMemoryMb * 1.15))
-            $dockerBigger = ($capacity.DockerCpu -ge ($tierProfile.TotalCpu * 1.15)) -and ($capacity.DockerMemoryMb -ge ($tierProfile.TotalMemoryMb * 1.15))
-
-            if ($hostBigger -and $dockerBigger) {
-                $catalog = Get-HwTierCatalog
-                $recommended = Get-BestFittingTier -Capacity $capacity -Catalog $catalog
-                $recommendedText = if ($recommended) { "-Hw $($recommended.Name)" } else { '-Hw auto' }
-
-                Write-Warning "The selected tier '$Hw' is smaller than the available hardware."
-                Write-Warning "Recommended option: $recommendedText"
-                $answer = Read-Host "Proceed anyway with tier '$Hw'? [y/N]"
-                if ($answer -notmatch '^(?i:y|yes)$') {
-                    throw 'Deployment cancelled by user.'
-                }
-            }
-        }
     }
 }
 
@@ -680,85 +430,132 @@ function Install-AwsCli {
 function Test-Dependencies {
     Write-Host ""
     Write-Host "==> Checking dependencies..."
+    $errors = 0
 
-    $issues = New-Object System.Collections.Generic.List[string]
-
-    function Add-Issue {
-        param([string]$Message)
-        [void]$issues.Add($Message)
-    }
-
-    switch ($Target) {
-        "local" {
-            if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-                Add-Issue "Docker is required for target 'local'. Install Docker Desktop and try again."
-            } else {
-                cmd /c "docker info >nul 2>nul"
-                if ($LASTEXITCODE -ne 0) {
-                    Add-Issue "Docker Desktop is installed but the daemon is not ready. Start Docker Desktop and retry."
-                }
-
-                cmd /c "docker compose version >nul 2>nul"
-                if ($LASTEXITCODE -ne 0) {
-                    Add-Issue "Docker Compose plugin is missing or unavailable. Update Docker Desktop."
-                }
-            }
-
-            $envFile = Join-Path $ProjectRoot ".env"
-            if (-not (Test-Path $envFile)) {
-                Add-Issue ".env is missing. Copy .env.template to .env and fill in the required values."
-            } else {
-                $jwtLine = Get-Content $envFile | Where-Object { $_ -match "^JWT_SECRET_KEY=" } | Select-Object -First 1
-                $jwtKey  = if ($jwtLine) { ($jwtLine -split "=", 2)[1].Trim().Trim('"').Trim("'") } else { "" }
-                if (-not $jwtKey -or $jwtKey -eq "REPLACE_WITH_STRONG_SECRET_MIN_32_CHARS" -or $jwtKey.Length -lt 32) {
-                    Add-Issue ".env: JWT_SECRET_KEY is missing, too short, or still using the template placeholder."
-                }
-
-                $pgLine = Get-Content $envFile | Where-Object { $_ -match "^POSTGRES_PASSWORD=" } | Select-Object -First 1
-                $pgPass = if ($pgLine) { ($pgLine -split "=", 2)[1].Trim().Trim('"').Trim("'") } else { "" }
-                if (-not $pgPass -or $pgPass -eq "StrongPassword12!") {
-                    Add-Issue ".env: POSTGRES_PASSWORD is empty or still using the template default."
-                }
-            }
-
-            # Target-specific hardware checks for local should happen here only.
-            # Do not read AWS files, AWS CLI, or AWS credentials in this branch.
+    # ── Docker + Compose (local target only) ─────────────────────────────────
+    if ($Target -eq "local") {
+        if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+            Write-Host "[MISSING] docker — auto-installing..."
+            Install-Docker  # exits after install; user must restart/re-run
         }
 
-        "aws" {
-            if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
-                Add-Issue "AWS CLI is required for target 'aws'. Install it and run 'aws configure'."
-            } else {
-                cmd /c "aws sts get-caller-identity >nul 2>nul"
-                if ($LASTEXITCODE -ne 0) {
-                    Add-Issue "AWS credentials are missing, invalid, or expired. Run 'aws configure' or set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY."
+        docker info 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[STOPPED] Docker daemon is not running — attempting to start Docker Desktop..."
+            $dockerExe = Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
+            if (Test-Path $dockerExe) {
+                Start-Process $dockerExe
+                Write-Host "          Waiting up to 30 seconds for Docker to become ready..."
+                $deadline = (Get-Date).AddSeconds(30)
+                while ((Get-Date) -lt $deadline) {
+                    Start-Sleep -Seconds 3
+                    docker info 2>&1 | Out-Null
+                    if ($LASTEXITCODE -eq 0) { break }
                 }
             }
-
-            $varFile = Join-Path $InfraDir "envs\aws.tfvars"
-            if (-not (Test-Path $varFile)) {
-                Add-Issue "$varFile not found. Copy aws.tfvars.example and fill in the required values."
+            docker info 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "[ERROR]   Docker daemon still not reachable. Start Docker Desktop manually and retry."
+                $errors++
+            } else {
+                Write-Host "[OK]      Docker daemon started"
             }
+        } else {
+            Write-Host "[OK]      $(docker --version)"
         }
 
-        "remote" {
-            if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
-                Add-Issue "SSH client is required for target 'remote'. Enable OpenSSH Client on Windows."
-            }
-
-            $varFile = Join-Path $InfraDir "envs\remote.tfvars"
-            if (-not (Test-Path $varFile)) {
-                Add-Issue "$varFile not found. Copy remote.tfvars.example and fill in the required values."
-            }
-        }
-
-        default {
-            Add-Issue "Unsupported target: $Target"
+        docker compose version 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "[MISSING] docker compose plugin — included with Docker Desktop; ensure it is up to date."
+            $errors++
+        } else {
+            Write-Host "[OK]      $(docker compose version)"
         }
     }
 
-    if ($issues.Count -gt 0) {
-        throw ($issues -join "`n")
+    # ── Terraform (all targets) ───────────────────────────────────────────────
+    if (Get-Command terraform -ErrorAction SilentlyContinue) {
+        $tfVerRaw = $null
+        try {
+            $tfJson   = terraform version -json 2>$null | ConvertFrom-Json -ErrorAction Stop
+            $tfVerRaw = $tfJson.terraform_version
+        } catch {
+            $m = (terraform version 2>$null | Select-String -Pattern '\d+\.\d+\.\d+').Matches
+            if ($m.Count -gt 0) { $tfVerRaw = $m[0].Value }
+        }
+
+        if ($tfVerRaw -and ([version]$tfVerRaw -ge $TerraformMin)) {
+            Write-Host "[OK]      terraform $tfVerRaw"
+        } else {
+            Write-Warning "[OLD]     terraform $tfVerRaw < $TerraformMin — auto-installing $TerraformInstall..."
+            Install-Terraform
+        }
+    } else {
+        Write-Host "[MISSING] terraform — auto-installing $TerraformInstall..."
+        Install-Terraform
+    }
+
+    # ── .env file and required values (all targets) ─────────────────────────
+    $envFile = Join-Path $ProjectRoot ".env"
+    if (-not (Test-Path $envFile)) {
+        Write-Warning "[MISSING] .env — copy the template and fill in your values:"
+        Write-Warning "          Copy-Item .env.template .env"
+        $errors++
+    } else {
+        $jwtLine = Get-Content -Path $envFile -Encoding UTF8 | Where-Object { $_ -match "^JWT_SECRET_KEY=" } | Select-Object -First 1
+        $jwtKey  = if ($jwtLine) { ($jwtLine -split "=", 2)[1].Trim().Trim('"').Trim("'") } else { "" }
+        if (-not $jwtKey -or $jwtKey -eq "REPLACE_WITH_STRONG_SECRET_MIN_32_CHARS" -or $jwtKey.Length -lt 32) {
+            Write-Warning "[INVALID] .env: JWT_SECRET_KEY is missing, too short (< 32 chars), or still the template placeholder."
+            Write-Warning "          Generate: python -c `"import secrets; print(secrets.token_urlsafe(48))`""
+            $errors++
+        } else {
+            Write-Host "[OK]      .env (JWT_SECRET_KEY set)"
+        }
+
+        $pgLine = Get-Content -Path $envFile -Encoding UTF8 | Where-Object { $_ -match "^POSTGRES_PASSWORD=" } | Select-Object -First 1
+        $pgPass = if ($pgLine) { ($pgLine -split "=", 2)[1].Trim().Trim('"').Trim("'") } else { "" }
+        if (-not $pgPass -or $pgPass -eq "StrongPassword12!") {
+            Write-Warning "[INVALID] .env: POSTGRES_PASSWORD is empty or still the template default (StrongPassword12!)."
+            $errors++
+        }
+    }
+
+    # ── AWS CLI + credentials (aws target) ───────────────────────────────────
+    if ($Target -eq "aws") {
+        if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+            Write-Host "[MISSING] aws CLI — auto-installing..."
+            Install-AwsCli
+        }
+        if (Get-Command aws -ErrorAction SilentlyContinue) {
+            Write-Host "[OK]      $(aws --version 2>&1)"
+            aws sts get-caller-identity 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "[INVALID] AWS credentials not configured or expired."
+                Write-Warning "          Run: aws configure   (or set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)"
+                $errors++
+            } else {
+                $acct = (aws sts get-caller-identity --query Account --output text 2>$null)
+                Write-Host "[OK]      AWS account $acct"
+            }
+        } else {
+            Write-Warning "[ERROR]   aws CLI still not found after install attempt."
+            $errors++
+        }
+    }
+
+    # ── SSH client (remote target) ────────────────────────────────────────────
+    if ($Target -eq "remote") {
+        if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
+            Write-Warning "[MISSING] ssh — enable via: Settings > System > Optional features > OpenSSH Client"
+            $errors++
+        } else {
+            Write-Host "[OK]      ssh"
+        }
+    }
+
+    if ($errors -gt 0) {
+        Write-Error "$errors dependency check(s) failed. Resolve the issues above and retry."
+        exit 1
     }
 
     Write-Host "==> All dependencies satisfied."
@@ -787,7 +584,7 @@ function Import-EnvAsTfVars {
         "WORKER_CONCURRENCY"             = "worker_concurrency"
     }
 
-    Get-Content $envFile | ForEach-Object {
+    Get-Content -Path $envFile -Encoding UTF8 | ForEach-Object {
         $line = $_.Trim()
         # Skip comments and blank lines
         if ($line -match "^#" -or $line -eq "") { return }
@@ -808,7 +605,7 @@ function Import-EnvAsTfVars {
     # CORS: comma-separated string → Terraform list JSON
     # Input:  "http://localhost:5173,http://127.0.0.1"
     # Output: ["http://localhost:5173","http://127.0.0.1"]
-    $corsLine = Get-Content $envFile | Where-Object { $_ -match "^CORS_ALLOW_ORIGINS=" } | Select-Object -First 1
+    $corsLine = Get-Content -Path $envFile -Encoding UTF8 | Where-Object { $_ -match "^CORS_ALLOW_ORIGINS=" } | Select-Object -First 1
     if ($corsLine) {
         $corsRaw = ($corsLine -split "=", 2)[1].Trim().Trim('"').Trim("'")
         $origins = $corsRaw -split "," | ForEach-Object { "`"$($_.Trim())`"" }
@@ -869,8 +666,6 @@ function Deploy-Local {
         Write-Error ".env not found. Run: Copy-Item .env.template .env"
         exit 1
     }
-
-    Assert-HardwareRequirements
 
     $composeFiles = if ($Profile -eq "dev") {
         "-f docker-compose.yml -f docker-compose.dev.yml"
