@@ -32,6 +32,7 @@ cp .env.template .env
 ./infra/scripts/deploy.sh --profile dev --target local --hw tiny    # laptop  (2-4 cores / 4-8 GB)
 ./infra/scripts/deploy.sh --profile dev --target local --hw small   # workstation (4-8 cores / 8-16 GB)
 ./infra/scripts/deploy.sh --profile prod --target local --hw medium # server (8-32 cores / 32-64 GB)
+./infra/scripts/deploy.sh --profile prod --target aws --hw large    # server (96 cores / 192 GB)
 ```
 
 ```powershell
