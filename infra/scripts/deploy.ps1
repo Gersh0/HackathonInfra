@@ -439,7 +439,7 @@ function Test-Dependencies {
             Install-Docker  # exits after install; user must restart/re-run
         }
 
-        docker info 2>&1 | Out-Null
+        cmd /c "docker info >nul 2>nul"
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[STOPPED] Docker daemon is not running — attempting to start Docker Desktop..."
             $dockerExe = Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
@@ -449,11 +449,11 @@ function Test-Dependencies {
                 $deadline = (Get-Date).AddSeconds(30)
                 while ((Get-Date) -lt $deadline) {
                     Start-Sleep -Seconds 3
-                    docker info 2>&1 | Out-Null
+                    cmd /c "docker info >nul 2>nul"
                     if ($LASTEXITCODE -eq 0) { break }
                 }
             }
-            docker info 2>&1 | Out-Null
+            cmd /c "docker info >nul 2>nul"
             if ($LASTEXITCODE -ne 0) {
                 Write-Warning "[ERROR]   Docker daemon still not reachable. Start Docker Desktop manually and retry."
                 $errors++
@@ -464,7 +464,7 @@ function Test-Dependencies {
             Write-Host "[OK]      $(docker --version)"
         }
 
-        docker compose version 2>&1 | Out-Null
+        cmd /c "docker compose version >nul 2>nul"
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "[MISSING] docker compose plugin — included with Docker Desktop; ensure it is up to date."
             $errors++
