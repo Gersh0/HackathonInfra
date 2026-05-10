@@ -57,6 +57,30 @@ param(
     [string]$Hw = ""
 )
 
+# -------------------------------------------------------------------
+# Ensure deploy.ps1 is stored as UTF-8 with BOM on Windows PowerShell
+# This prevents encoding-related parsing issues on some Windows hosts.
+# -------------------------------------------------------------------
+
+try {
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        $scriptPath = $MyInvocation.MyCommand.Path
+
+        if ($scriptPath -and (Test-Path $scriptPath)) {
+            $content = Get-Content $scriptPath -Raw
+
+            [System.IO.File]::WriteAllText(
+                $scriptPath,
+                $content,
+                [System.Text.UTF8Encoding]::new($true)
+            )
+        }
+    }
+}
+catch {
+    Write-Warning "Failed to normalize deploy.ps1 encoding to UTF-8 with BOM."
+}
+
 $ErrorActionPreference = "Stop"
 
 # Ensure consistent UTF-8 behavior in Windows PowerShell
