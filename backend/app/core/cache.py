@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import random
@@ -252,10 +253,10 @@ class AsyncRedisCache:
             return 0
 
     async def delete_many_patterns(self, patterns: Iterable[str]) -> int:
-        deleted = 0
-        for pattern in patterns:
-            deleted += await self.delete_by_pattern(pattern)
-        return deleted
+        results = await asyncio.gather(
+            *[self.delete_by_pattern(pattern) for pattern in patterns]
+        )
+        return sum(results)
 
     async def acquire_soft_lock(self, key: str, ttl_seconds: int) -> bool:
         try:

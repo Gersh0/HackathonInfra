@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from app.auth.jwt import require_current_user_id
 from app.api.response_mappers import to_user_response, to_video_response
 from app.core.settings import settings
-from app.dependencies import get_subscription_service, get_user_service, rate_limit_mutations
+from app.dependencies import get_subscription_service, get_user_service
 from app.schemas.pagination import PaginatedResponse
 from app.schemas.subscription import SubscriptionListResponse, SubscriptionResponse
 from app.schemas.user import ProviderListResponse, UserResponse
@@ -23,7 +23,7 @@ def _page_meta(items: list, offset: int, total_count: int) -> tuple[int, int | N
     return page_count, next_offset
 
 
-@router.get("", response_model=PaginatedResponse[UserResponse])
+@router.get("", response_model=PaginatedResponse[UserResponse], response_model_exclude_unset=True)
 async def list_users(
     limit: int = Query(settings.default_page_size, ge=1, le=settings.max_page_size),
     offset: int = Query(0, ge=0),
@@ -47,7 +47,6 @@ async def create_user(
     provider_subject: str = Form(""),
     email: str | None = Form(None),
     avatar: UploadFile | None = File(None),
-    _: None = Depends(rate_limit_mutations),
     user_service: UserServicePort = Depends(get_user_service),
 ):
     user = await user_service.create_user(
@@ -72,7 +71,6 @@ async def subscribe(
     user_id: int,
     creator_id: int,
     current_user_id: int = Depends(require_current_user_id),
-    _: None = Depends(rate_limit_mutations),
     subscription_service: SubscriptionServicePort = Depends(get_subscription_service),
 ):
     if current_user_id != user_id:
@@ -85,7 +83,6 @@ async def unsubscribe(
     user_id: int,
     creator_id: int,
     current_user_id: int = Depends(require_current_user_id),
-    _: None = Depends(rate_limit_mutations),
     subscription_service: SubscriptionServicePort = Depends(get_subscription_service),
 ):
     if current_user_id != user_id:
@@ -107,7 +104,7 @@ async def get_subscriptions(
     return SubscriptionListResponse(creator_ids=creator_ids)
 
 
-@router.get("/{user_id}/feed", response_model=PaginatedResponse[VideoResponse])
+@router.get("/{user_id}/feed", response_model=PaginatedResponse[VideoResponse], response_model_exclude_unset=True)
 async def get_subscription_feed(
     user_id: int,
     limit: int = Query(settings.default_page_size, ge=1, le=settings.max_page_size),

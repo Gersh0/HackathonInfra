@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Respon
 from app.auth.jwt import require_current_user_id
 from app.api.response_mappers import to_video_response
 from app.core.settings import settings
-from app.dependencies import get_comment_service, get_user_service, get_video_service, rate_limit_mutations
+from app.dependencies import get_comment_service, get_user_service, get_video_service
 from app.schemas.comment import CommentCreate, CommentResponse
 from app.schemas.pagination import PaginatedResponse
 from app.schemas.video import VideoResponse
@@ -54,7 +54,7 @@ def _media_accel_response(path_value: str) -> Response:
     )
 
 
-@router.get("", response_model=PaginatedResponse[VideoResponse])
+@router.get("", response_model=PaginatedResponse[VideoResponse], response_model_exclude_unset=True)
 async def get_videos(
     limit: int = Query(settings.default_page_size, ge=1, le=settings.max_page_size),
     offset: int = Query(0, ge=0),
@@ -78,7 +78,6 @@ async def upload_video(
     file: UploadFile = File(...),
     thumbnail: UploadFile | None = File(None),
     current_user_id: int = Depends(require_current_user_id),
-    _: None = Depends(rate_limit_mutations),
     video_service: VideoServicePort = Depends(get_video_service),
 ):
     video = await video_service.upload_video(
@@ -92,7 +91,7 @@ async def upload_video(
     return to_video_response(video)
 
 
-@router.get("/{video_id}", response_model=VideoResponse)
+@router.get("/{video_id}", response_model=VideoResponse, response_model_exclude_unset=True)
 async def get_video(
     video_id: int,
     response: Response,
@@ -149,14 +148,13 @@ async def stream_video_thumbnail(video_id: int, video_service: VideoServicePort 
 async def delete_video(
     video_id: int,
     current_user_id: int = Depends(require_current_user_id),
-    _: None = Depends(rate_limit_mutations),
     video_service: VideoServicePort = Depends(get_video_service),
 ):
     await video_service.delete_video(video_id=video_id, requester_user_id=current_user_id)
     return {"status": "ok"}
 
 
-@router.get("/{video_id}/comments", response_model=PaginatedResponse[CommentResponse])
+@router.get("/{video_id}/comments", response_model=PaginatedResponse[CommentResponse], response_model_exclude_unset=True)
 async def get_comments(
     video_id: int,
     limit: int = Query(settings.default_page_size, ge=1, le=settings.max_page_size),
@@ -172,12 +170,11 @@ async def get_comments(
     )
 
 
-@router.post("/{video_id}/comments", response_model=CommentResponse)
+@router.post("/{video_id}/comments", response_model=CommentResponse, response_model_exclude_unset=True)
 async def post_comment(
     video_id: int,
     payload: CommentCreate,
     current_user_id: int = Depends(require_current_user_id),
-    _: None = Depends(rate_limit_mutations),
     user_service: UserServicePort = Depends(get_user_service),
     comment_service: CommentServicePort = Depends(get_comment_service),
 ):
@@ -185,7 +182,7 @@ async def post_comment(
     return await comment_service.create_comment(video_id=video_id, author=user.display_name, content=payload.content)
 
 
-@router.get("/{video_id}/recommended", response_model=PaginatedResponse[VideoResponse])
+@router.get("/{video_id}/recommended", response_model=PaginatedResponse[VideoResponse], response_model_exclude_unset=True)
 async def get_recommended(
     video_id: int,
     limit: int = Query(8, ge=1, le=settings.max_page_size),

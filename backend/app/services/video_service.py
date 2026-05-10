@@ -65,7 +65,13 @@ class VideoService:
 
     async def count_videos(self, query: str | None = None) -> int:
         normalized_query = (query or "").strip().lower()
-        return await self.repo.count_all(query=normalized_query or None)
+        count_key = f"cache:videos:count:{normalized_query or 'all'}"
+        cached = await self.cache.get_json(count_key)
+        if isinstance(cached, int):
+            return cached
+        count = await self.repo.count_all(query=normalized_query or None)
+        await self.cache.write_with_lock(count_key, count, ttl_seconds=45)
+        return count
 
     async def get_video(self, video_id: int) -> Video:
         video = await self.repo.get_by_id(video_id)
@@ -124,7 +130,7 @@ class VideoService:
             self.dispatcher.enqueue_video_processing(created.id)
         except Exception:
             logger.exception("video_processing_enqueue_failed video_id=%s", created.id)
-        await self._invalidate_video_related_cache()
+        await self._invalidate_on_upload()
         return created
 
     async def get_recommended(self, video_id: int, limit: int = 8) -> list[Video]:
@@ -138,7 +144,7 @@ class VideoService:
         logger.info("cache_miss endpoint=videos_recommended key=%s", key)
         terms = sorted({term.strip().lower() for term in current.title.split() if len(term.strip()) >= 2})
         videos = await self.repo.get_recommended_by_title_terms(exclude_video_id=current.id, terms=terms, limit=limit)
-        await self.cache.write_with_lock(key, videos_to_payload(videos), ttl_seconds=30)
+        await self.cache.write_with_lock(key, videos_to_payload(videos), ttl_seconds=int(os.getenv("VIDEO_DETAIL_CACHE_TTL", "30")))
         return videos
 
     async def get_video_with_view_increment(self, video_id: int) -> Video:
@@ -194,19 +200,31 @@ class VideoService:
             file_paths.append(video.thumbnail_path)
 
         await self.repo.delete(video)
-        await self._invalidate_video_related_cache()
+        await self._invalidate_on_delete(video_id)
         self._cleanup_media_files(file_paths, upload_root=Path("uploads"))
 
-    async def _invalidate_video_related_cache(self) -> None:
+    async def _invalidate_on_upload(self) -> None:
         deleted = await self.cache.delete_many_patterns(
             [
                 "cache:videos:list:*",
                 "cache:videos:recommended:*",
-                "cache:videos:detail:*",
+                "cache:videos:count:*",
                 "cache:feeds:*",
             ]
         )
-        logger.info("cache_invalidate scope=video_related deleted=%s", deleted)
+        logger.info("cache_invalidate scope=upload deleted=%s", deleted)
+
+    async def _invalidate_on_delete(self, video_id: int) -> None:
+        deleted = await self.cache.delete_many_patterns(
+            [
+                "cache:videos:list:*",
+                "cache:videos:recommended:*",
+                f"cache:videos:detail:{video_id}",
+                "cache:videos:count:*",
+                "cache:feeds:*",
+            ]
+        )
+        logger.info("cache_invalidate scope=delete video_id=%s deleted=%s", video_id, deleted)
 
     def _save_upload_file(self, file: UploadFile, directory: Path, default_name: str) -> str:
         suffix = Path(file.filename or default_name).suffix or Path(default_name).suffix

@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, ORJSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
@@ -40,7 +40,11 @@ async def lifespan(_app: FastAPI):
         pass
 
 
-app = FastAPI(title="YouTube Clone API", lifespan=lifespan)
+app = FastAPI(
+    title="YouTube Clone API",
+    lifespan=lifespan,
+    default_response_class=ORJSONResponse,
+)
 configure_tracing(app, engine)
 
 app.add_middleware(

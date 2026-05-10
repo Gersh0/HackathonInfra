@@ -20,6 +20,7 @@ dependencies = [
   "sqlalchemy==2.0.43",
   "psycopg[binary]==3.2.9",
   "pydantic==2.11.7",
+  "orjson>=3.9.0",
   "pydantic-settings==2.10.1",
   "python-multipart==0.0.20",
 ]

@@ -130,7 +130,6 @@ services:
   backend:
     build:
       context: ./backend
-    container_name: youtube_clone_backend
     profiles: ["prod"]
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-ci_user}
@@ -205,6 +204,10 @@ services:
         soft: 65535
         hard: 65535
     deploy:
+      replicas: ${BACKEND_REPLICAS:-1}
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
       resources:
         limits:
           cpus: "${BACKEND_CPU_LIMIT:-48.00}"
