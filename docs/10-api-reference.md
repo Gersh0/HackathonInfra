@@ -370,6 +370,30 @@ Get recommended videos (related content, excluding current video).
 
 ---
 
+### `GET /videos/{video_id}/redis-probe`
+
+Diagnostic endpoint. Measures Redis latency for the view-count increment, view-count read, and analytics write for a given video. No auth required.
+
+**Query params:**
+- `perf` (bool, optional) — if `true`, includes timing breakdown in response headers (`X-Perf-Route-Ms`, `X-Perf-View-Incr-Ms`, `X-Perf-View-Read-Ms`, `X-Perf-Analytics-Ms`, `X-Perf-Total-Ms`)
+
+**Response `200`:**
+```json
+{
+  "video_id": 1,
+  "views": 42,
+  "total_ms": 1.24,
+  "view_incr_ms": 0.41,
+  "view_read_ms": 0.38,
+  "analytics_ms": 0.45
+}
+```
+
+**Errors:**
+- `404` — video not found
+
+---
+
 ## Error Format
 
 All errors follow a consistent format:

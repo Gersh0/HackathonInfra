@@ -300,4 +300,23 @@ Full deploy guide: [AWS EC2 Deployment](07-deployment-aws.md)
 
 ---
 
+## Performance Optimizations
+
+Key changes made to maximize throughput for the competition:
+
+- **Trigram index** (`pg_trgm`) on `videos.title` — accelerates `GET /videos?q=` full-text search under concurrency.
+- **`VIDEO_DETAIL_CACHE_TTL` env var** — per-tier Redis TTL for video detail responses (30 s on `tiny`, 60 s elsewhere).
+- **`BACKEND_REPLICAS`** — multiple backend containers share Postgres connection load; each replica runs its own Gunicorn pool.
+- **Nginx traffic class segmentation** — three `location` blocks (`/api/videos/{id}/stream`, `/api/videos/upload`, `/api/`) with independent timeout and buffer profiles so a slow upload never blocks fast API reads.
+- **`ORJSONResponse` as default response class** — faster JSON serialization than Python's stdlib `json`.
+- **`response_model_exclude_unset=True`** on all list endpoints — removes null fields from paginated responses, reducing payload size.
+- **Scoped cache invalidation** — video update/delete invalidates only the affected detail key, not the entire list cache.
+- **COUNT query caching** — `count_videos()` and `count_users()` results are cached in Redis alongside list results to avoid a second DB round-trip per page.
+- **`pool_pre_ping=False`** — disables the per-checkout connection health check, saving one TCP round-trip per request at high concurrency.
+- **Parallel Redis invalidation** — `asyncio.gather()` flushes multiple cache keys concurrently during video delete.
+- **Rate limiting disabled** — all `Depends(rate_limit_*)` calls removed from route handlers for the competition load test; the rate-limit functions remain in `dependencies.py` for easy re-enablement.
+- **Full async SQLAlchemy** — async sessions throughout; no synchronous DB calls on hot paths.
+
+---
+
 [← Environment Variables](04-environment-variables.md) · [Wiki Index](index.md) · [Development Guide →](06-development.md)

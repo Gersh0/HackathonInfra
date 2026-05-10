@@ -8,13 +8,13 @@ Hardware profiles solve this: pass `--hw <tier>` to the deploy script and it aut
 
 ## Tiers at a glance
 
-| Tier | Target hardware | Cores | RAM | Docker budget |
-|------|----------------|-------|-----|---------------|
-| `auto` | Any — script detects CPU & RAM | — | — | derived at deploy time |
-| `tiny` | Dev laptop | 2–4 | 4–8 GB | ~4 CPU / ~2 GB |
-| `small` | Workstation / gaming PC | 4–8 | 8–16 GB | ~8.5 CPU / ~6 GB |
-| `medium` | Dedicated server | 8–32 | 32–64 GB | ~27 CPU / ~27 GB |
-| `large` | AWS c5.24xlarge | 96 | 192 GB | ~96 CPU / ~152 GB |
+| Tier | Target hardware | Cores | RAM | Docker budget | Backend replicas |
+|------|----------------|-------|-----|---------------|:----------------:|
+| `auto` | Any — script detects CPU & RAM | — | — | derived at deploy time | derived |
+| `tiny` | Dev laptop | 2–4 | 4–8 GB | ~4 CPU / ~2 GB | 1 |
+| `small` | Workstation / gaming PC | 4–8 | 8–16 GB | ~8.5 CPU / ~6 GB | 2 |
+| `medium` | Dedicated server | 8–32 | 32–64 GB | ~27 CPU / ~27 GB | 3 |
+| `large` | AWS c5.24xlarge | 96 | 192 GB | ~96 CPU / ~152 GB | 4 |
 
 > **Rule of thumb:** Docker gets roughly 25–35% of your total RAM. The OS, IDE, and other processes need the rest.
 
@@ -102,8 +102,9 @@ The deploy script reads the preset file from `infra/envs/hw-<tier>.env` and expo
 ### tiny — Dev laptop
 
 ```
-Workers:        backend=2, rq=1
-DB pool:        pool=3, overflow=3, timeout=3s → 2×(3+3)=12 max connections
+Replicas:       backend=1
+Workers:        backend=2 per replica (2 total), rq=1
+DB pool:        pool=5, overflow=5 per worker → 1×2×(5+5)=20 max connections
 anyio threads:  6 per worker
 Redis conns:    40
 Cache TTL:      30s
@@ -117,8 +118,9 @@ Limits:         nginx=0.5CPU/128M  postgres=1CPU/512M  redis=0.5CPU/256M
 ### small — Workstation
 
 ```
-Workers:        backend=4, rq=2
-DB pool:        pool=8, overflow=12, timeout=3s → 4×(8+12)=80 max connections
+Replicas:       backend=2
+Workers:        backend=4 per replica (8 total), rq=2
+DB pool:        pool=3, overflow=2 per worker → 2×4×(3+2)=40 max connections
 anyio threads:  20 per worker
 Redis conns:    200
 Cache TTL:      60s
@@ -132,8 +134,9 @@ Limits:         nginx=1CPU/256M  postgres=2CPU/2G  redis=1CPU/768M
 ### medium — Server
 
 ```
-Workers:        backend=16, rq=8
-DB pool:        pool=8, overflow=12, timeout=3s → 16×(8+12)=320 max connections
+Replicas:       backend=3
+Workers:        backend=5 per replica (15 total), rq=8
+DB pool:        pool=3, overflow=2 per worker → 3×5×(3+2)=75 max connections
 anyio threads:  20 per worker
 Redis conns:    500
 Cache TTL:      60s
@@ -147,8 +150,9 @@ Limits:         nginx=2CPU/512M  postgres=6CPU/8G  redis=2CPU/6G
 ### large — c5.24xlarge
 
 ```
-Workers:        backend=97, rq=12
-DB pool:        pool=12, overflow=12, timeout=3s → 97×(12+12)=2,328 max connections
+Replicas:       backend=4
+Workers:        backend=24 per replica (96 total), rq=12
+DB pool:        pool=4, overflow=3 per worker → 4×24×(4+3)=672 max connections
 anyio threads:  24 per worker
 Redis conns:    2500
 Cache TTL:      60s
@@ -158,6 +162,8 @@ Redis:          maxmemory=16gb
 Limits:         nginx=4CPU/2G  postgres=24CPU/64G  redis=4CPU/18G
                 backend=48CPU/48G  worker=12CPU/16G  frontend=4CPU/4G
 ```
+
+> **DB pool values are per-replica per-worker.** Total Postgres connections = `BACKEND_REPLICAS × BACKEND_WEB_CONCURRENCY × (DB_POOL_SIZE + DB_MAX_OVERFLOW)`.
 
 ---
 

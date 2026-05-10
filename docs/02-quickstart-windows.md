@@ -65,6 +65,13 @@ openssl rand -base64 48
 
 ## Step 3 — Start the stack
 
+> **Before running docker compose**, export the database and Redis URLs so the backend can connect. Replace the values with the credentials you set in `.env`:
+>
+> ```powershell
+> $env:DATABASE_URL = "postgresql+psycopg://your_db_username:StrongPassword123!@postgres:5432/youtube_clone"
+> $env:REDIS_URL    = "redis://redis:6379/0"
+> ```
+
 Use the deploy script and pick the `--hw` tier that matches your machine:
 
 ```powershell
