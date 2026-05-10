@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # deploy.ps1 — Single-command deployment entrypoint (Windows PowerShell)
 # =============================================================================
 #
@@ -157,9 +157,22 @@ function Invoke-HwAutoDetect {
 
     switch ($Target) {
         "local" {
-            $cpuTotal   = [Environment]::ProcessorCount
-            $cs         = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
-            $memTotalMb = [int]($cs.TotalPhysicalMemory / 1MB)
+            $cpuTotal = [Environment]::ProcessorCount
+
+            try {
+                if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
+                    $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+                    $memTotalMb = [int]($cs.TotalPhysicalMemory / 1MB)
+                }
+                else {
+                    $cs = Get-WmiObject -Class Win32_ComputerSystem -ErrorAction Stop
+                    $memTotalMb = [int]($cs.TotalPhysicalMemory / 1MB)
+                }
+            }
+            catch {
+                Write-Error "Unable to determine local physical memory."
+                exit 1
+            }
         }
         "aws" {
             $varFile = Join-Path $InfraDir "envs\aws.tfvars"
@@ -353,12 +366,12 @@ function Import-HwProfile {
 
     Write-Host "==> Loading hardware profile: $Hw ($hwFile)"
 
-    Get-Content -Path $hwFile -Encoding UTF8 | ForEach-Object {
-        $line = $_.Trim()
-        if ($line -match "^#" -or $line -eq "") { return }
+    foreach ($rawLine in Get-Content -Path $hwFile -Encoding UTF8) {
+        $line = $rawLine.Trim()
+        if ($line -match "^#" -or $line -eq "") { continue }
 
         $eqIdx = $line.IndexOf("=")
-        if ($eqIdx -lt 0) { return }
+        if ($eqIdx -lt 0) { continue }
 
         $key   = $line.Substring(0, $eqIdx).Trim()
         $value = $line.Substring($eqIdx + 1).Trim()
@@ -392,7 +405,7 @@ function Install-Terraform {
     $zipPath = Join-Path $tmpDir $zip
     try {
         Write-Host "==> Downloading $url"
-        Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
+        Invoke-WebRequest -Uri $url -OutFile $zipPath
         Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
         Move-Item -Force (Join-Path $tmpDir "terraform.exe") (Join-Path $TerraformBinDir "terraform.exe")
     } finally {
@@ -438,7 +451,7 @@ function Install-AwsCli {
             "https://awscli.amazonaws.com/AWSCLIV2.msi"
         }
         $msiPath = Join-Path $env:TEMP "AWSCLIV2.msi"
-        Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
+        Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath
         Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /qn" -Wait
         Remove-Item $msiPath -ErrorAction SilentlyContinue
     }
@@ -607,14 +620,16 @@ function Import-EnvAsTfVars {
         "WORKER_CONCURRENCY"             = "worker_concurrency"
     }
 
-    Get-Content -Path $envFile -Encoding UTF8 | ForEach-Object {
-        $line = $_.Trim()
+    $corsRaw = $null
+
+    foreach ($rawLine in Get-Content -Path $envFile -Encoding UTF8) {
+        $line = $rawLine.Trim()
         # Skip comments and blank lines
-        if ($line -match "^#" -or $line -eq "") { return }
+        if ($line -match "^#" -or $line -eq "") { continue }
 
         # Split on first '=' only
         $eqIdx = $line.IndexOf("=")
-        if ($eqIdx -lt 0) { return }
+        if ($eqIdx -lt 0) { continue }
 
         $key   = $line.Substring(0, $eqIdx).Trim()
         $value = $line.Substring($eqIdx + 1).Trim().Trim('"').Trim("'")
@@ -623,14 +638,16 @@ function Import-EnvAsTfVars {
             $varName = "TF_VAR_$($tfMap[$key])"
             [System.Environment]::SetEnvironmentVariable($varName, $value, "Process")
         }
+
+        if ($key -eq "CORS_ALLOW_ORIGINS") {
+            $corsRaw = $value
+        }
     }
 
     # CORS: comma-separated string → Terraform list JSON
     # Input:  "http://localhost:5173,http://127.0.0.1"
     # Output: ["http://localhost:5173","http://127.0.0.1"]
-    $corsLine = Get-Content -Path $envFile -Encoding UTF8 | Where-Object { $_ -match "^CORS_ALLOW_ORIGINS=" } | Select-Object -First 1
-    if ($corsLine) {
-        $corsRaw = ($corsLine -split "=", 2)[1].Trim().Trim('"').Trim("'")
+    if ($corsRaw) {
         $origins = $corsRaw -split "," | ForEach-Object { "`"$($_.Trim())`"" }
         $corsJson = "[" + ($origins -join ",") + "]"
         [System.Environment]::SetEnvironmentVariable("TF_VAR_cors_allow_origins", $corsJson, "Process")
@@ -651,22 +668,27 @@ function Invoke-Terraform {
 
     try {
         Write-Host "==> terraform init"
-        terraform init -input=false
+        $terraformArgs = @("init", "-input=false")
+        & terraform @terraformArgs
         if ($LASTEXITCODE -ne 0) { throw "terraform init failed" }
 
         switch ($Action) {
             "plan" {
                 Write-Host "==> terraform plan"
-                terraform plan -input=false -var-file=$VarFile
+                $terraformArgs = @("plan", "-input=false", "-var-file=$VarFile")
             }
             "apply" {
                 Write-Host "==> terraform apply"
-                terraform apply -input=false -auto-approve -var-file=$VarFile
+                $terraformArgs = @("apply", "-input=false", "-auto-approve", "-var-file=$VarFile")
             }
             "destroy" {
                 Write-Host "==> terraform destroy"
-                terraform destroy -input=false -auto-approve -var-file=$VarFile
+                $terraformArgs = @("destroy", "-input=false", "-auto-approve", "-var-file=$VarFile")
             }
+        }
+
+        if ($terraformArgs.Count -gt 0 -and $terraformArgs[0] -ne "init") {
+            & terraform @terraformArgs
         }
 
         if ($LASTEXITCODE -ne 0) { throw "terraform $Action failed" }
@@ -690,31 +712,33 @@ function Deploy-Local {
         exit 1
     }
 
-    $composeFiles = if ($Profile -eq "dev") {
-        "-f docker-compose.yml -f docker-compose.dev.yml"
+    $composeBaseArgs = @("compose")
+    if ($Profile -eq "dev") {
+        $composeBaseArgs += @("-f", "docker-compose.yml", "-f", "docker-compose.dev.yml")
     } else {
-        "-f docker-compose.yml"
+        $composeBaseArgs += @("-f", "docker-compose.yml")
     }
-    $buildFlag = if ($NoBuild) { "" } else { "--build" }
+    $composeBaseArgs += @("--profile", $Profile)
 
     Push-Location $ProjectRoot
     try {
         switch ($Action) {
             "apply" {
-                $cmd = "docker compose $composeFiles --profile $Profile up -d $buildFlag".Trim()
-                Write-Host "==> $cmd"
-                Invoke-Expression $cmd
+                $dockerArgs = $composeBaseArgs + @("up", "-d")
+                if (-not $NoBuild) { $dockerArgs += "--build" }
+                Write-Host "==> docker $($dockerArgs -join ' ')"
+                & docker @dockerArgs
             }
             "destroy" {
-                $cmd = "docker compose $composeFiles --profile $Profile down --remove-orphans"
-                Write-Host "==> $cmd"
-                Invoke-Expression $cmd
+                $dockerArgs = $composeBaseArgs + @("down", "--remove-orphans")
+                Write-Host "==> docker $($dockerArgs -join ' ')"
+                & docker @dockerArgs
             }
             "plan" {
                 # Show resolved compose config without starting anything
-                $cmd = "docker compose $composeFiles --profile $Profile config"
-                Write-Host "==> $cmd  (dry-run: shows resolved config)"
-                Invoke-Expression $cmd
+                $dockerArgs = $composeBaseArgs + @("config")
+                Write-Host "==> docker $($dockerArgs -join ' ')  (dry-run: shows resolved config)"
+                & docker @dockerArgs
             }
         }
         if ($LASTEXITCODE -ne 0) { throw "docker compose $Action failed" }
