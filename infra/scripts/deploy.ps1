@@ -444,8 +444,7 @@ function Install-AwsCli {
     }
 
     # Refresh PATH so aws is callable in this session
-    $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
-                [System.Environment]::GetEnvironmentVariable("PATH", "User")
+    $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
 
     Write-Host "==> AWS CLI installed."
     Write-Host "    Run 'aws configure' to set up your credentials."
