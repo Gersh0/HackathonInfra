@@ -1,9 +1,7 @@
 from pathlib import Path
-import mimetypes
-from pathlib import PurePosixPath
 import time
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
 
 from app.auth.jwt import require_current_user_id
 from app.api.response_mappers import to_video_response
@@ -24,34 +22,6 @@ def _page_meta(items: list, offset: int, total_count: int) -> tuple[int, int | N
     next_offset = offset + page_count if offset + page_count < total_count else None
     return page_count, next_offset
 
-
-def _to_internal_upload_path(path_value: str) -> str:
-    normalized = path_value.replace("\\", "/")
-    marker = "uploads/"
-    idx = normalized.rfind(marker)
-    if idx != -1:
-        relative = normalized[idx + len(marker):]
-    else:
-        relative = Path(normalized).name
-
-    parts = [part for part in PurePosixPath(relative).parts if part not in ("", ".", "..")]
-    if not parts:
-        raise HTTPException(status_code=404, detail="Media path not found")
-
-    return f"/_protected_uploads/{'/'.join(parts)}"
-
-
-def _media_accel_response(path_value: str) -> Response:
-    internal_path = _to_internal_upload_path(path_value)
-    content_type = mimetypes.guess_type(path_value)[0] or "application/octet-stream"
-    return Response(
-        status_code=200,
-        headers={
-            "X-Accel-Redirect": internal_path,
-            "Content-Type": content_type,
-            "Cache-Control": "public, max-age=3600",
-        },
-    )
 
 
 @router.get("", response_model=PaginatedResponse[VideoResponse], response_model_exclude_unset=True)
@@ -129,19 +99,6 @@ async def redis_probe(
         response.headers["X-Perf-Analytics-Ms"] = f"{result['analytics_ms']:.2f}"
     return result
 
-
-@router.get("/{video_id}/stream")
-async def stream_video(video_id: int, video_service: VideoServicePort = Depends(get_video_service)):
-    video = await video_service.get_video(video_id)
-    return _media_accel_response(video.file_path)
-
-
-@router.get("/{video_id}/thumbnail")
-async def stream_video_thumbnail(video_id: int, video_service: VideoServicePort = Depends(get_video_service)):
-    video = await video_service.get_video(video_id)
-    if not video.thumbnail_path:
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
-    return _media_accel_response(video.thumbnail_path)
 
 
 @router.delete("/{video_id}")

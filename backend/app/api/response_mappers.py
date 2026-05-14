@@ -52,7 +52,7 @@ def to_video_response(video) -> VideoResponse:
         description=video.description,
         created_at=video.created_at,
         views=video.views,
-        stream_url=f"/api/videos/{video.id}/stream",
-        thumbnail_url=f"/api/videos/{video.id}/thumbnail" if video.thumbnail_path else None,
+        stream_url=to_upload_url(video.file_path),
+        thumbnail_url=to_upload_url(video.thumbnail_path) if video.thumbnail_path else None,
         uploader=uploader,
     )
